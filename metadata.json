@@ -1,0 +1,6 @@
+{
+  "name": "Logbook",
+  "description": "Structured log manager with categories, advanced tagging, pinning, import/export, and selectable Local SQLite or Supabase storage.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,94 @@
+@import "tailwindcss";
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *, [data-theme="midnight"], [data-theme="midnight"] *));
+
+:root,
+:root[data-theme="dark"] {
+  --bg-canvas: #0f1115;
+  --bg-surface: #15181e;
+  --bg-elevated: #1b1f27;
+  --bg-hover: #212630;
+  --border-hairline: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.14);
+  --text-primary: #eef0f4;
+  --text-secondary: #a1a8b3;
+  --text-muted: #6e7684;
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --pin-accent: #eab308;
+  --pin-surface: rgba(234, 179, 8, 0.07);
+  --danger: #ef4444;
+  --success: #22c55e;
+  color-scheme: dark;
+}
+
+:root[data-theme="midnight"] {
+  --bg-canvas: #090e1a;
+  --bg-surface: #0f172a;
+  --bg-elevated: #162038;
+  --bg-hover: #1d2a48;
+  --border-hairline: rgba(148, 163, 184, 0.12);
+  --border-strong: rgba(148, 163, 184, 0.22);
+  --text-primary: #e8edf7;
+  --text-secondary: #98a6c0;
+  --text-muted: #667594;
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --pin-accent: #f59e0b;
+  --pin-surface: rgba(245, 158, 11, 0.08);
+  --danger: #f87171;
+  --success: #34d399;
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg-canvas: #f5f5f4;
+  --bg-surface: #ffffff;
+  --bg-elevated: #f0f0ee;
+  --bg-hover: #e7e5e4;
+  --border-hairline: rgba(15, 23, 42, 0.09);
+  --border-strong: rgba(15, 23, 42, 0.16);
+  --text-primary: #18181b;
+  --text-secondary: #52525b;
+  --text-muted: #71717a;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --pin-accent: #b45309;
+  --pin-surface: rgba(217, 119, 6, 0.07);
+  --danger: #dc2626;
+  --success: #16a34a;
+  color-scheme: light;
+}
+
+@layer base {
+  html,
+  body {
+    height: 100%;
+    background-color: var(--bg-canvas);
+    color: var(--text-primary);
+    font-family: "Plus Jakarta Sans", "Vazirmatn", -apple-system, BlinkMacSystemFont, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  .font-mono,
+  .tabular-nums {
+    font-family: "JetBrains Mono", "Vazirmatn", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Custom subtle scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
