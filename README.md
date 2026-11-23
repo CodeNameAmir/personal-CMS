@@ -60,7 +60,7 @@ This repository includes:
      - *Tip*: During initial GitHub Pages certificate verification, keep proxy off (DNS-only) until GitHub finishes issuing the domain certificate and **Enforce HTTPS** is active, then turn the ArvanCloud cloud proxy ON.
 2. **SSL / TLS Mode** in ArvanCloud CDN → HTTPS Settings:
    - Set SSL mode to **Full** (or **Full Strict**) once GitHub Pages HTTPS is enabled to avoid redirect loops.
-3. **Caching Page Rules** (Recommended):
+3. **Caching Page Rules** (Recommended): 
    - Bypass CDN cache (or use very short TTL) for `/index.html` and `/` so new deployments show up immediately.
    - Cache `/assets/*` aggressively (hashed Vite filenames).
 
