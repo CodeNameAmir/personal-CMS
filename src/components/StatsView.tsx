@@ -48,8 +48,8 @@ export const StatsView: React.FC<StatsViewProps> = ({
           <div className="mt-2 text-3xl font-semibold font-mono tabular-nums text-[var(--text-primary)]">
             {stats.total_logs}
           </div>
-          <div className="mt-1 text-xs text-[var(--text-muted)] font-mono tabular-nums">
-            {stats.with_attachments} {t('withAttachmentsCount')}
+          <div className="mt-1 text-xs text-[var(--text-muted)]">
+            {t('recordedEntries')}
           </div>
         </div>
 

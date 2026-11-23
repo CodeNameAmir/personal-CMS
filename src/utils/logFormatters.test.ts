@@ -29,9 +29,6 @@ const sampleLogs: LogEntry[] = [
       { id: 't2', name: 'prod', color: '#f59e0b' },
     ],
     pinned: false,
-    attachment_name: null,
-    attachment_path: null,
-    attachment_size: null,
     created_at: '2026-11-20T12:00:00.000Z',
     updated_at: '2026-11-20T12:00:00.000Z',
   },
@@ -46,9 +43,6 @@ const sampleLogs: LogEntry[] = [
       { id: 't3', name: 'backup', color: '#10b981' },
     ],
     pinned: true,
-    attachment_name: 'backup.txt',
-    attachment_path: 'backup.txt',
-    attachment_size: 2048,
     created_at: '2026-11-19T08:30:00.000Z',
     updated_at: '2026-11-19T08:30:00.000Z',
   },
@@ -61,7 +55,6 @@ const baseFilters: LogFilters = {
   tagMatchMode: 'any',
   dateFrom: '',
   pinnedOnly: false,
-  hasFileOnly: false,
 };
 
 test('normalizeTagName cleans hashtags, spaces, and preserves Persian letters', () => {
@@ -120,7 +113,6 @@ test('computeLogStats calculates category, tag, and pinned totals accurately', (
   const stats = computeLogStats(sampleLogs, sampleCategories, new Date('2026-11-21T10:00:00.000Z'));
   assert.equal(stats.total_logs, 2);
   assert.equal(stats.pinned_logs, 1);
-  assert.equal(stats.with_attachments, 1);
   assert.equal(stats.total_categories, 2);
   assert.equal(stats.total_tags, 3);
   assert.equal(stats.by_tag[0].tag_name, 'prod');

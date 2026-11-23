@@ -1,5 +1,3 @@
-export type DbMode = 'local' | 'supabase';
-
 export type ThemeId = 'dark' | 'midnight' | 'light';
 
 export type Language = 'en' | 'fa';
@@ -30,9 +28,6 @@ export interface LogEntry {
   category_color: string;
   tags: Tag[];
   pinned: boolean;
-  attachment_name: string | null;
-  attachment_path: string | null;
-  attachment_size: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -44,7 +39,6 @@ export interface LogFilters {
   tagMatchMode: TagMatchMode;
   dateFrom: string;
   pinnedOnly: boolean;
-  hasFileOnly: boolean;
 }
 
 export interface CategoryStat {
@@ -71,7 +65,6 @@ export interface LogStats {
   pinned_logs: number;
   total_categories: number;
   total_tags: number;
-  with_attachments: number;
   by_category: CategoryStat[];
   by_tag: TagStat[];
   by_day: DayStat[];
@@ -87,10 +80,11 @@ export interface ImportResult {
 export interface UserSession {
   id: string;
   username: string;
-  db_mode: DbMode;
 }
 
 export interface AppConfig {
+  supabaseUrl: string;
+  supabasePublishableKey: string;
   supabaseConfigured: boolean;
 }
 

@@ -38,7 +38,7 @@ export function normalizeTagName(raw: string): string {
 }
 
 /**
- * Parses a comma or space separated tag string into unique normalized tag names.
+ * Parses a comma or newline separated tag string into unique normalized tag names.
  */
 export function parseTagInput(raw: string): string[] {
   const parts = raw
@@ -69,7 +69,6 @@ export function filterAndSortLogs(logs: LogEntry[], filters: LogFilters): LogEnt
 
   const filtered = logs.filter((log) => {
     if (filters.pinnedOnly && !log.pinned) return false;
-    if (filters.hasFileOnly && !log.attachment_name) return false;
     if (filters.categoryId && log.category_id !== filters.categoryId) return false;
 
     if (dateFromMs !== null && !Number.isNaN(dateFromMs)) {
@@ -306,7 +305,7 @@ function escapeCSVCell(value: string): string {
 }
 
 export function serializeLogsToCSV(logs: LogEntry[]): string {
-  const header = ['id', 'category', 'tags', 'pinned', 'message', 'attachment_name', 'created_at', 'updated_at'];
+  const header = ['id', 'category', 'tags', 'pinned', 'message', 'created_at', 'updated_at'];
   const lines = [header.join(',')];
 
   for (const log of logs) {
@@ -316,7 +315,6 @@ export function serializeLogsToCSV(logs: LogEntry[]): string {
       log.tags.map((t) => t.name).join('; '),
       log.pinned ? 'true' : 'false',
       log.message,
-      log.attachment_name || '',
       log.created_at,
       log.updated_at,
     ].map((cell) => escapeCSVCell(String(cell)));
@@ -339,7 +337,6 @@ export function serializeLogsToJSON(logs: LogEntry[], categories: Category[]): s
         tags: l.tags.map((t) => t.name),
         pinned: l.pinned,
         message: l.message,
-        attachment_name: l.attachment_name,
         created_at: l.created_at,
         updated_at: l.updated_at,
       })),
@@ -350,7 +347,7 @@ export function serializeLogsToJSON(logs: LogEntry[], categories: Category[]): s
 }
 
 /**
- * Computes dashboard statistics without any log levels.
+ * Computes dashboard statistics without any log levels or file attachments.
  */
 export function computeLogStats(logs: LogEntry[], categories: Category[], now = new Date()): LogStats {
   const catMap = new Map<string, { name: string; color: string; count: number }>();
@@ -360,7 +357,6 @@ export function computeLogStats(logs: LogEntry[], categories: Category[], now = 
 
   const tagMap = new Map<string, { id: string; name: string; color: string; count: number }>();
   let pinnedCount = 0;
-  let attachmentCount = 0;
 
   // Build 30-day window buckets ending today
   const dayBuckets = new Map<string, number>();
@@ -374,7 +370,6 @@ export function computeLogStats(logs: LogEntry[], categories: Category[], now = 
 
   for (const log of logs) {
     if (log.pinned) pinnedCount += 1;
-    if (log.attachment_name) attachmentCount += 1;
 
     if (log.category_id && catMap.has(log.category_id)) {
       catMap.get(log.category_id)!.count += 1;
@@ -433,7 +428,6 @@ export function computeLogStats(logs: LogEntry[], categories: Category[], now = 
     pinned_logs: pinnedCount,
     total_categories: categories.length,
     total_tags: tagMap.size,
-    with_attachments: attachmentCount,
     by_category,
     by_tag,
     by_day,
@@ -463,16 +457,4 @@ export function formatExactTime(iso: string): string {
     hour: '2-digit',
     minute: '2-digit',
   });
-}
-
-export function formatFileSize(bytes?: number | null): string {
-  if (bytes == null || bytes < 0) return '';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  let idx = 0;
-  let val = bytes;
-  while (val >= 1024 && idx < units.length - 1) {
-    val /= 1024;
-    idx += 1;
-  }
-  return `${val >= 10 || idx === 0 ? val.toFixed(0) : val.toFixed(1)} ${units[idx]}`;
 }

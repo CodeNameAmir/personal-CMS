@@ -22,23 +22,17 @@ import {
   createTag,
   deleteCategory,
   deleteLog,
-  deleteLogAttachment,
   deleteTag,
-  downloadLogAttachment,
-  exportLogs,
-  fetchStats,
+  downloadExportLogs,
   fetchSupabaseSchema,
+  fetchWorkspace,
   importLogs,
-  listCategories,
-  listLogs,
-  listTags,
   logout,
   setUnauthorizedHandler,
   togglePinLog,
   updateCategory,
   updateLog,
   updateTag,
-  uploadLogAttachment,
 } from './api/client';
 import { AuthScreen } from './components/AuthScreen';
 import { LogTable } from './components/LogTable';
@@ -58,11 +52,11 @@ import type {
   Language,
   LogEntry,
   LogFilters,
-  LogStats,
   Tag,
   ThemeId,
   UserSession,
 } from './types/logbook';
+import { computeLogStats, filterAndSortLogs } from './utils/logFormatters';
 
 const EMPTY_FILTERS: LogFilters = {
   q: '',
@@ -71,7 +65,6 @@ const EMPTY_FILTERS: LogFilters = {
   tagMatchMode: 'any',
   dateFrom: '',
   pinnedOnly: false,
-  hasFileOnly: false,
 };
 
 interface ToastItem {
@@ -101,6 +94,14 @@ export default function App() {
     return 'en';
   });
 
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('logbook_sidebar_collapsed') === 'true';
+    } catch {
+      return false;
+    }
+  });
+
   const t = useMemo(() => getTranslator(lang), [lang]);
 
   useEffect(() => {
@@ -122,18 +123,26 @@ export default function App() {
     }
   }, [lang]);
 
+  const handleToggleSidebarCollapse = () => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('logbook_sidebar_collapsed', String(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  };
+
   const [user, setUser] = useState<UserSession | null>(null);
   const [activeTab, setActiveTab] = useState<'logs' | 'stats'>('logs');
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   const [categories, setCategories] = useState<Category[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [totalLogs, setTotalLogs] = useState(0);
-  const [totalUnfiltered, setTotalUnfiltered] = useState(0);
-  const [stats, setStats] = useState<LogStats | null>(null);
+  const [allLogs, setAllLogs] = useState<LogEntry[]>([]);
   const [loadingLogs, setLoadingLogs] = useState(false);
-  const [loadingStats, setLoadingStats] = useState(false);
 
   const [filters, setFilters] = useState<LogFilters>(EMPTY_FILTERS);
   const [searchDraft, setSearchDraft] = useState('');
@@ -191,30 +200,37 @@ export default function App() {
     if (!user) return;
     setLoadingLogs(true);
     try {
-      const [catsRes, tagsRes, logsRes, statsRes] = await Promise.all([
-        listCategories(),
-        listTags(),
-        listLogs(filters, pageSize, (page - 1) * pageSize),
-        fetchStats(),
-      ]);
-      setCategories(catsRes);
-      setTags(tagsRes);
-      setLogs(logsRes.logs);
-      setTotalLogs(logsRes.total);
-      setTotalUnfiltered(logsRes.total_unfiltered);
-      setStats(statsRes);
+      const snapshot = await fetchWorkspace();
+      setCategories(snapshot.categories || []);
+      setTags(snapshot.tags || []);
+      setAllLogs(snapshot.logs || []);
     } catch (err) {
       await handleApiError(err, 'Failed to load workspace data');
     } finally {
       setLoadingLogs(false);
     }
-  }, [user, filters, page, pageSize, handleApiError]);
+  }, [user, handleApiError]);
 
   useEffect(() => {
     if (user) {
       loadWorkspaceData();
     }
   }, [user, loadWorkspaceData]);
+
+  // Derived filtered logs, pagination, and stats from single consistent workspace snapshot
+  const filteredLogs = useMemo(() => filterAndSortLogs(allLogs, filters), [allLogs, filters]);
+  const pagedLogs = useMemo(() => {
+    const start = (page - 1) * pageSize;
+    return filteredLogs.slice(start, start + pageSize);
+  }, [filteredLogs, page, pageSize]);
+
+  const stats = useMemo(() => computeLogStats(allLogs, categories), [allLogs, categories]);
+
+  // Clamp page if filtered length shrinks
+  useEffect(() => {
+    const maxPage = Math.max(1, Math.ceil(filteredLogs.length / pageSize));
+    if (page > maxPage) setPage(maxPage);
+  }, [filteredLogs.length, page, pageSize]);
 
   // Debounce search input
   useEffect(() => {
@@ -285,8 +301,7 @@ export default function App() {
         filters.categoryId ||
         filters.selectedTags.length > 0 ||
         filters.dateFrom ||
-        filters.pinnedOnly ||
-        filters.hasFileOnly
+        filters.pinnedOnly
     );
   }, [filters]);
 
@@ -296,25 +311,22 @@ export default function App() {
     category_id: string | null;
     tags: string[];
     pinned: boolean;
-    file?: File | null;
   }) => {
     try {
-      const saved = payload.id
-        ? await updateLog(payload.id, {
-            message: payload.message,
-            category_id: payload.category_id,
-            tags: payload.tags,
-            pinned: payload.pinned,
-          })
-        : await createLog({
-            message: payload.message,
-            category_id: payload.category_id,
-            tags: payload.tags,
-            pinned: payload.pinned,
-          });
-
-      if (payload.file) {
-        await uploadLogAttachment(saved.id, payload.file);
+      if (payload.id) {
+        await updateLog(payload.id, {
+          message: payload.message,
+          category_id: payload.category_id,
+          tags: payload.tags,
+          pinned: payload.pinned,
+        });
+      } else {
+        await createLog({
+          message: payload.message,
+          category_id: payload.category_id,
+          tags: payload.tags,
+          pinned: payload.pinned,
+        });
       }
 
       pushToast(payload.id ? t('logUpdated') : t('logAdded'), 'ok');
@@ -434,13 +446,13 @@ export default function App() {
     return res;
   };
 
-  const handleExport = async (format: 'json' | 'csv') => {
+  const handleExport = (format: 'json' | 'csv') => {
     setDataMenuOpen(false);
     try {
-      await exportLogs(format, filters);
+      downloadExportLogs(format, allLogs, categories, filters);
       pushToast(`${t('exportedLabel')} ${format.toUpperCase()}`, 'ok');
     } catch (err) {
-      await handleApiError(err, 'Export failed');
+      handleApiError(err, 'Export failed');
     }
   };
 
@@ -448,10 +460,9 @@ export default function App() {
     setUserMenuOpen(false);
     await logout();
     setUser(null);
-    setLogs([]);
+    setAllLogs([]);
     setCategories([]);
     setTags([]);
-    setStats(null);
     setFilters(EMPTY_FILTERS);
     setSearchDraft('');
     setSelectedIds([]);
@@ -480,29 +491,20 @@ export default function App() {
       <Sidebar
         lang={lang}
         activeTab={activeTab}
-        onSelectTab={(tab) => {
-          setActiveTab(tab);
-          if (tab === 'stats') {
-            setLoadingStats(true);
-            fetchStats()
-              .then(setStats)
-              .catch(() => {})
-              .finally(() => setLoadingStats(false));
-          }
-        }}
-        dbMode={user.db_mode}
+        onSelectTab={setActiveTab}
         categories={categories}
         tags={tags}
         filters={filters}
-        totalLogsCount={totalUnfiltered}
-        pinnedCount={stats?.pinned_logs ?? 0}
-        filesCount={stats?.with_attachments ?? 0}
+        totalLogsCount={allLogs.length}
+        pinnedCount={stats.pinned_logs}
         onFilterChange={handleFilterChange}
         onToggleTagFilter={handleToggleTagFilter}
         onOpenNewCategory={() => setTaxonomyModal({ kind: 'category', item: null })}
         onEditCategory={(cat) => setTaxonomyModal({ kind: 'category', item: cat })}
         onOpenNewTag={() => setTaxonomyModal({ kind: 'tag', item: null })}
         onEditTag={(tag) => setTaxonomyModal({ kind: 'tag', item: tag })}
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={handleToggleSidebarCollapse}
         mobileOpen={mobileSidebarOpen}
         onCloseMobile={() => setMobileSidebarOpen(false)}
       />
@@ -524,11 +526,9 @@ export default function App() {
                 ? t('statistics')
                 : filters.pinnedOnly
                   ? t('pinnedLogs')
-                  : filters.hasFileOnly
-                    ? t('withAttachments')
-                    : filters.categoryId
-                      ? categories.find((c) => c.id === filters.categoryId)?.name || t('categoryLabel')
-                      : t('allLogs')}
+                  : filters.categoryId
+                    ? categories.find((c) => c.id === filters.categoryId)?.name || t('categoryLabel')
+                    : t('allLogs')}
             </h1>
           </div>
 
@@ -681,7 +681,7 @@ export default function App() {
         </header>
 
         {/* Main Workspace Content */}
-        <main className="flex-1 p-4 sm:p-6 max-w-[1400px] w-full mx-auto space-y-4">
+        <main className="flex-1 p-4 sm:p-6 max-w-[1600px] w-full mx-auto space-y-4">
           {supabaseSqlPrompt && (
             <div className="p-4 rounded-xl border border-amber-500/40 bg-amber-500/10 flex flex-wrap items-center justify-between gap-3 text-xs">
               <div>
@@ -805,9 +805,9 @@ export default function App() {
 
               <LogTable
                 lang={lang}
-                logs={logs}
+                logs={pagedLogs}
                 loading={loadingLogs}
-                totalLogs={totalLogs}
+                totalLogs={filteredLogs.length}
                 page={page}
                 pageSize={pageSize}
                 categories={categories}
@@ -819,8 +819,8 @@ export default function App() {
                 }
                 onToggleSelectAll={() => {
                   const allSelected =
-                    logs.length > 0 && logs.every((l) => selectedIds.includes(l.id));
-                  setSelectedIds(allSelected ? [] : logs.map((l) => l.id));
+                    pagedLogs.length > 0 && pagedLogs.every((l) => selectedIds.includes(l.id));
+                  setSelectedIds(allSelected ? [] : pagedLogs.map((l) => l.id));
                 }}
                 onClearSelection={() => setSelectedIds([])}
                 onBulkAction={handleBulkAction}
@@ -849,7 +849,7 @@ export default function App() {
             <StatsView
               lang={lang}
               stats={stats}
-              loading={loadingStats}
+              loading={loadingLogs}
               onFilterCategory={(catId) => {
                 setActiveTab('logs');
                 handleFilterChange({ categoryId: catId });
@@ -872,17 +872,6 @@ export default function App() {
           availableTags={tags}
           onClose={() => setEditingLog(undefined)}
           onSave={handleSaveLog}
-          onRemoveAttachment={async (logId) => {
-            const res = await deleteLogAttachment(logId);
-            setEditingLog(res.log);
-            await loadWorkspaceData();
-            pushToast(t('attachmentRemoved'), 'ok');
-          }}
-          onDownloadAttachment={(logId, filename) => {
-            downloadLogAttachment(logId, filename).catch((err) =>
-              handleApiError(err, t('downloadFailed'))
-            );
-          }}
         />
       )}
 
@@ -898,11 +887,6 @@ export default function App() {
           }}
           onDelete={handleDeleteLog}
           onCopy={handleCopyText}
-          onDownloadAttachment={(logId, filename) => {
-            downloadLogAttachment(logId, filename).catch((err) =>
-              handleApiError(err, t('downloadFailed'))
-            );
-          }}
           onFilterTag={handleToggleTagFilter}
         />
       )}
@@ -932,7 +916,6 @@ export default function App() {
           lang={lang}
           onChangeLang={setLang}
           username={user.username}
-          dbMode={user.db_mode}
           theme={theme}
           onChangeTheme={setTheme}
           onChangePassword={async (cur, next) => {

@@ -6,7 +6,6 @@ import {
   Copy,
   FileText,
   MoreVertical,
-  Paperclip,
   Pencil,
   Pin,
   PinOff,
@@ -16,7 +15,7 @@ import {
 } from 'lucide-react';
 import { getTranslator } from '../i18n/translations';
 import type { Category, Language, LogEntry } from '../types/logbook';
-import { formatExactTime, formatFileSize, formatRelativeTime } from '../utils/logFormatters';
+import { formatExactTime, formatRelativeTime } from '../utils/logFormatters';
 
 interface LogTableProps {
   lang: Language;
@@ -314,7 +313,7 @@ export const LogTable: React.FC<LogTableProps> = ({
                           </button>
                         </td>
 
-                        <td className="py-2.5 px-3 align-middle max-w-[460px]">
+                        <td className="py-2.5 px-3 align-middle max-w-[520px]">
                           <button
                             type="button"
                             onClick={() => onViewDetail(log)}
@@ -324,15 +323,6 @@ export const LogTable: React.FC<LogTableProps> = ({
                           >
                             {log.message}
                           </button>
-                          {log.attachment_name && (
-                            <div className="mt-0.5 flex items-center gap-1 text-[11px] text-[var(--text-muted)] font-mono">
-                              <Paperclip className="w-3 h-3 shrink-0" />
-                              <span className="truncate max-w-[220px]">{log.attachment_name}</span>
-                              {log.attachment_size != null && (
-                                <span>({formatFileSize(log.attachment_size)})</span>
-                              )}
-                            </div>
-                          )}
                         </td>
 
                         <td className="py-2.5 px-3 align-middle">
@@ -496,15 +486,7 @@ export const LogTable: React.FC<LogTableProps> = ({
                     </div>
                   )}
 
-                  <div className="pt-1 flex items-center justify-between text-xs text-[var(--text-secondary)]">
-                    <div className="flex items-center gap-2">
-                      {log.attachment_name && (
-                        <span className="inline-flex items-center gap-1 font-mono text-[11px]">
-                          <Paperclip className="w-3 h-3" />
-                          {log.attachment_name}
-                        </span>
-                      )}
-                    </div>
+                  <div className="pt-1 flex items-center justify-end text-xs text-[var(--text-secondary)]">
                     <div className="flex items-center gap-1">
                       <button
                         type="button"

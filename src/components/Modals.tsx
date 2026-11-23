@@ -2,11 +2,9 @@ import React, { useEffect, useState } from 'react';
 import {
   Check,
   Copy,
-  Download,
   FileUp,
   Hash,
   KeyRound,
-  Paperclip,
   Pencil,
   Pin,
   PinOff,
@@ -15,13 +13,18 @@ import {
   Webhook,
   X,
 } from 'lucide-react';
-import { createApiToken, deleteApiToken, listApiTokens, sendWebhookLog } from '../api/client';
+import {
+  createApiToken,
+  deleteApiToken,
+  getLoadedConfig,
+  listApiTokens,
+  sendWebhookLog,
+} from '../api/client';
 import { getTranslator } from '../i18n/translations';
 import type {
   ApiTokenRecord,
   Category,
   CreatedApiToken,
-  DbMode,
   ImportResult,
   Language,
   LogEntry,
@@ -32,7 +35,6 @@ import {
   CATEGORY_PALETTE,
   TAG_PALETTE,
   formatExactTime,
-  formatFileSize,
   formatRelativeTime,
   parseTagInput,
 } from '../utils/logFormatters';
@@ -108,10 +110,7 @@ interface LogEditorModalProps {
     category_id: string | null;
     tags: string[];
     pinned: boolean;
-    file?: File | null;
   }) => Promise<void>;
-  onRemoveAttachment: (logId: string) => Promise<void>;
-  onDownloadAttachment: (logId: string, filename: string) => void;
 }
 
 export const LogEditorModal: React.FC<LogEditorModalProps> = ({
@@ -121,8 +120,6 @@ export const LogEditorModal: React.FC<LogEditorModalProps> = ({
   availableTags,
   onClose,
   onSave,
-  onRemoveAttachment,
-  onDownloadAttachment,
 }) => {
   const t = getTranslator(lang);
   const defaultCatId =
@@ -136,7 +133,6 @@ export const LogEditorModal: React.FC<LogEditorModalProps> = ({
   const [selectedTags, setSelectedTags] = useState<string[]>(log ? log.tags.map((tg) => tg.name) : []);
   const [tagDraft, setTagDraft] = useState('');
   const [pinned, setPinned] = useState(Boolean(log?.pinned));
-  const [file, setFile] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -195,7 +191,6 @@ export const LogEditorModal: React.FC<LogEditorModalProps> = ({
         category_id: categoryId || null,
         tags: finalTags,
         pinned,
-        file,
       });
       onClose();
     } catch (err) {
@@ -291,6 +286,7 @@ export const LogEditorModal: React.FC<LogEditorModalProps> = ({
             {selectedTags.map((tagName) => (
               <span
                 key={tagName}
+                dir="ltr"
                 className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[var(--bg-elevated)] border border-[var(--border-hairline)] text-xs font-mono text-[var(--text-primary)]"
               >
                 <span className="text-[var(--accent)]">#</span>
@@ -323,6 +319,7 @@ export const LogEditorModal: React.FC<LogEditorModalProps> = ({
                 <button
                   key={tg.id}
                   type="button"
+                  dir="ltr"
                   onClick={() => addTagToken(tg.name)}
                   className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-[var(--border-hairline)] bg-[var(--bg-canvas)] hover:bg-[var(--bg-hover)] text-[11px] font-mono text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
                 >
@@ -332,43 +329,6 @@ export const LogEditorModal: React.FC<LogEditorModalProps> = ({
               ))}
             </div>
           )}
-        </div>
-
-        {/* Attachment */}
-        <div>
-          <label htmlFor="log-file-input" className="block text-xs font-medium text-[var(--text-secondary)] mb-1.5">
-            {t('attachmentLabel')}
-          </label>
-          {log?.attachment_name && !file && (
-            <div className="mb-2 flex items-center justify-between px-3 py-2 rounded-lg bg-[var(--bg-canvas)] border border-[var(--border-hairline)] text-xs">
-              <button
-                type="button"
-                onClick={() => onDownloadAttachment(log.id, log.attachment_name!)}
-                className="flex items-center gap-2 text-[var(--accent)] hover:underline truncate"
-              >
-                <Paperclip className="w-3.5 h-3.5 shrink-0" />
-                <span className="truncate">{log.attachment_name}</span>
-                {log.attachment_size != null && (
-                  <span className="text-[var(--text-muted)] font-mono">
-                    ({formatFileSize(log.attachment_size)})
-                  </span>
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={() => onRemoveAttachment(log.id)}
-                className="text-red-400 hover:underline ms-2 shrink-0"
-              >
-                {t('remove')}
-              </button>
-            </div>
-          )}
-          <input
-            id="log-file-input"
-            type="file"
-            onChange={(e) => setFile(e.target.files?.[0] || null)}
-            className="w-full text-xs text-[var(--text-secondary)] file:me-3 file:py-1.5 file:px-3 file:rounded-md file:border file:border-[var(--border-hairline)] file:bg-[var(--bg-elevated)] file:text-xs file:font-medium file:text-[var(--text-primary)] hover:file:bg-[var(--bg-hover)]"
-          />
         </div>
 
         {error && (
@@ -390,7 +350,6 @@ interface LogDetailModalProps {
   onTogglePin: (log: LogEntry) => void;
   onDelete: (log: LogEntry) => void;
   onCopy: (text: string) => void;
-  onDownloadAttachment: (logId: string, filename: string) => void;
   onFilterTag: (tagName: string) => void;
 }
 
@@ -402,7 +361,6 @@ export const LogDetailModal: React.FC<LogDetailModalProps> = ({
   onTogglePin,
   onDelete,
   onCopy,
-  onDownloadAttachment,
   onFilterTag,
 }) => {
   const t = getTranslator(lang);
@@ -488,6 +446,7 @@ export const LogDetailModal: React.FC<LogDetailModalProps> = ({
                 <button
                   key={tg.id}
                   type="button"
+                  dir="ltr"
                   onClick={() => {
                     onFilterTag(tg.name);
                     onClose();
@@ -500,27 +459,6 @@ export const LogDetailModal: React.FC<LogDetailModalProps> = ({
               ))
             )}
           </div>
-
-          {log.attachment_name && (
-            <>
-              <span className="text-[var(--text-muted)]">{t('attachmentDetailLabel')}</span>
-              <div>
-                <button
-                  type="button"
-                  onClick={() => onDownloadAttachment(log.id, log.attachment_name!)}
-                  className="inline-flex items-center gap-1.5 text-[var(--accent)] hover:underline font-mono"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  <span>{log.attachment_name}</span>
-                  {log.attachment_size != null && (
-                    <span className="text-[var(--text-muted)]">
-                      ({formatFileSize(log.attachment_size)})
-                    </span>
-                  )}
-                </button>
-              </div>
-            </>
-          )}
         </div>
 
         <div
@@ -689,7 +627,9 @@ export const TaxonomyModal: React.FC<TaxonomyModalProps> = ({
                 onClick={() => setColor(c)}
                 aria-label={`Select color ${c}`}
                 className={`w-6 h-6 rounded-full transition-transform ${
-                  color.toLowerCase() === c.toLowerCase() ? 'ring-2 ring-white ring-offset-2 ring-offset-[var(--bg-surface)] scale-110' : ''
+                  color.toLowerCase() === c.toLowerCase()
+                    ? 'ring-2 ring-white ring-offset-2 ring-offset-[var(--bg-surface)] scale-110'
+                    : ''
                 }`}
                 style={{ backgroundColor: c }}
               />
@@ -867,7 +807,6 @@ interface AccountModalProps {
   lang: Language;
   onChangeLang: (lang: Language) => void;
   username: string;
-  dbMode: DbMode;
   theme: ThemeId;
   onChangeTheme: (theme: ThemeId) => void;
   onChangePassword: (currentPass: string, newPass: string) => Promise<void>;
@@ -881,7 +820,6 @@ export const AccountModal: React.FC<AccountModalProps> = ({
   lang,
   onChangeLang,
   username,
-  dbMode,
   theme,
   onChangeTheme,
   onChangePassword,
@@ -991,13 +929,16 @@ export const AccountModal: React.FC<AccountModalProps> = ({
     }
   };
 
-  const webhookUrl =
-    typeof window !== 'undefined' ? `${window.location.origin}/api/webhook/logs` : '/api/webhook/logs';
+  const cfg = getLoadedConfig();
+  const baseSupabaseUrl = cfg.supabaseUrl ? cfg.supabaseUrl.replace(/\/+$/, '') : 'https://YOUR_PROJECT.supabase.co';
+  const pubKey = cfg.supabasePublishableKey || 'YOUR_SUPABASE_PUBLISHABLE_KEY';
+  const webhookUrl = `${baseSupabaseUrl}/rest/v1/rpc/lb_ingest_webhook`;
   const sampleTokenForCurl = newlyCreatedToken?.raw_token || 'lbk_YOUR_API_TOKEN';
   const curlSnippet = `curl -X POST "${webhookUrl}" \\
-  -H "Authorization: Bearer ${sampleTokenForCurl}" \\
+  -H "apikey: ${pubKey}" \\
+  -H "Authorization: Bearer ${pubKey}" \\
   -H "Content-Type: application/json" \\
-  -d '{"message":"Deploy completed on node-1","category":"Deployment","tags":["prod","webhook"],"pinned":false}'`;
+  -d '{"p_raw_token":"${sampleTokenForCurl}","p_message":"Deploy completed on node-1","p_category":"Deployment","p_tags":["prod","webhook"],"p_pinned":false}'`;
 
   const handleSendTestWebhook = async () => {
     setWebhookError('');
@@ -1070,7 +1011,7 @@ export const AccountModal: React.FC<AccountModalProps> = ({
               <div className="text-end">
                 <div className="text-[var(--text-muted)]">{t('storageLabel')}</div>
                 <div className="mt-0.5 font-mono text-[var(--text-primary)]">
-                  {dbMode === 'supabase' ? t('supabasePostgresLabel') : t('localSqlite')}
+                  {t('supabasePostgresLabel')}
                 </div>
               </div>
             </div>

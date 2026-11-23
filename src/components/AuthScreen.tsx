@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { Cloud, Database, Eye, EyeOff, KeyRound, Languages, Lock, Moon, ShieldCheck, Sun } from 'lucide-react';
+import { Eye, EyeOff, Languages, Lock, Moon, ShieldCheck, Sun } from 'lucide-react';
 import { ApiError, fetchConfig, fetchSupabaseSchema, login, signup } from '../api/client';
 import { getTranslator } from '../i18n/translations';
-import type { AppConfig, DbMode, Language, ThemeId, UserSession } from '../types/logbook';
+import type { AppConfig, Language, ThemeId, UserSession } from '../types/logbook';
 
 interface AuthScreenProps {
   theme: ThemeId;
@@ -21,11 +21,10 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
 }) => {
   const t = getTranslator(lang);
   const [mode, setMode] = useState<'login' | 'signup'>('login');
-  const [dbMode, setDbMode] = useState<DbMode>('local');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [config, setConfig] = useState<AppConfig>({ supabaseConfigured: false });
+  const [config, setConfig] = useState<AppConfig | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
@@ -49,15 +48,6 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     }
   };
 
-  const handleFillDemo = () => {
-    setMode('login');
-    setDbMode('local');
-    setUsername('demo');
-    setPassword('demo1234');
-    setErrorMsg('');
-    setSchemaMissing(false);
-  };
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
@@ -68,26 +58,18 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       return;
     }
 
-    if (dbMode === 'supabase' && !config.supabaseConfigured) {
+    const activeConfig = config || (await fetchConfig().catch(() => null));
+    if (!activeConfig?.supabaseConfigured) {
       setErrorMsg(t('supabaseNotConfigured'));
       return;
     }
 
     setSubmitting(true);
     try {
-      if (mode === 'signup') {
-        await signup({
-          username: username.trim(),
-          password,
-          db_mode: dbMode,
-        });
-      }
-
-      const res = await login({
-        username: username.trim(),
-        password,
-        db_mode: dbMode,
-      });
+      const res =
+        mode === 'signup'
+          ? await signup({ username: username.trim(), password })
+          : await login({ username: username.trim(), password });
       onAuthenticated(res.user);
     } catch (err) {
       if (err instanceof ApiError && err.code === 'SCHEMA_MISSING') {
@@ -129,7 +111,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
         </div>
       </header>
 
-      <main className="w-full max-w-[440px] mx-auto my-8">
+      <main className="w-full max-w-[420px] mx-auto my-8">
         <div className="rounded-xl border border-[var(--border-hairline)] bg-[var(--bg-surface)] p-7">
           <div className="mb-6">
             <h1 className="text-xl font-semibold tracking-tight text-[var(--text-primary)]">
@@ -138,47 +120,6 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
             <p className="mt-1.5 text-sm text-[var(--text-secondary)]">
               {mode === 'login' ? t('signInSubtitle') : t('signUpSubtitle')}
             </p>
-          </div>
-
-          {/* Storage engine selector (Connects to server Secrets automatically for Supabase) */}
-          <div className="mb-5">
-            <span className="block text-xs font-medium text-[var(--text-secondary)] mb-2">
-              {t('storageBackend')}
-            </span>
-            <div className="grid grid-cols-2 gap-2 p-1 rounded-lg bg-[var(--bg-canvas)] border border-[var(--border-hairline)]">
-              <button
-                type="button"
-                onClick={() => {
-                  setDbMode('local');
-                  setErrorMsg('');
-                  setSchemaMissing(false);
-                }}
-                className={`flex items-center justify-center gap-2 py-2 px-3 rounded-md text-sm font-medium transition-colors whitespace-nowrap ${
-                  dbMode === 'local'
-                    ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-strong)]'
-                    : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] border border-transparent'
-                }`}
-              >
-                <Database className="w-4 h-4 shrink-0" />
-                <span>{t('localSqlite')}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setDbMode('supabase');
-                  setErrorMsg('');
-                  setSchemaMissing(false);
-                }}
-                className={`flex items-center justify-center gap-2 py-2 px-3 rounded-md text-sm font-medium transition-colors whitespace-nowrap ${
-                  dbMode === 'supabase'
-                    ? 'bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-strong)]'
-                    : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] border border-transparent'
-                }`}
-              >
-                <Cloud className="w-4 h-4 shrink-0" />
-                <span>{t('supabaseCloud')}</span>
-              </button>
-            </div>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-4">
@@ -253,20 +194,6 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
               <span>{submitting ? t('pleaseWait') : mode === 'login' ? t('signIn') : t('createAccount')}</span>
             </button>
           </form>
-
-          {dbMode === 'local' && mode === 'login' && (
-            <div className="mt-4 pt-4 border-t border-[var(--border-hairline)] flex items-center justify-between text-xs text-[var(--text-secondary)]">
-              <span>{t('exploreSampleLogs')}</span>
-              <button
-                type="button"
-                onClick={handleFillDemo}
-                className="inline-flex items-center gap-1.5 font-medium text-[var(--text-primary)] hover:text-[var(--accent)] transition-colors"
-              >
-                <KeyRound className="w-3.5 h-3.5" />
-                <span>{t('fillDemoAccount')}</span>
-              </button>
-            </div>
-          )}
 
           <div className="mt-5 text-center text-sm text-[var(--text-secondary)]">
             {mode === 'login' ? (
