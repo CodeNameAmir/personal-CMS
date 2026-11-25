@@ -26,8 +26,12 @@ import {
   downloadExportLogs,
   fetchSupabaseSchema,
   fetchWorkspace,
+  getAuthToken,
   importLogs,
   logout,
+  restoreSession,
+  SESSION_TOKEN_STORAGE_KEY,
+  setAuthToken,
   setUnauthorizedHandler,
   togglePinLog,
   updateCategory,
@@ -136,6 +140,7 @@ export default function App() {
   };
 
   const [user, setUser] = useState<UserSession | null>(null);
+  const [restoringSession, setRestoringSession] = useState<boolean>(() => Boolean(getAuthToken()));
   const [activeTab, setActiveTab] = useState<'logs' | 'stats'>('logs');
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
@@ -177,9 +182,45 @@ export default function App() {
   useEffect(() => {
     setUnauthorizedHandler(() => {
       setUser(null);
+      setAllLogs([]);
+      setCategories([]);
+      setTags([]);
       pushToast(getTranslator(lang)('sessionExpired'), 'error');
     });
   }, [pushToast, lang]);
+
+  // Restore session on page refresh or when opening a new tab
+  useEffect(() => {
+    let active = true;
+    restoreSession()
+      .then((resumedUser) => {
+        if (!active) return;
+        setUser(resumedUser);
+      })
+      .finally(() => {
+        if (active) setRestoringSession(false);
+      });
+
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== SESSION_TOKEN_STORAGE_KEY && e.key !== null) return;
+      if (!e.newValue) {
+        setAuthToken(null);
+        setUser(null);
+        setAllLogs([]);
+        setCategories([]);
+        setTags([]);
+      } else {
+        restoreSession().then((resumedUser) => {
+          if (resumedUser) setUser(resumedUser);
+        });
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => {
+      active = false;
+      window.removeEventListener('storage', onStorage);
+    };
+  }, []);
 
   const handleApiError = useCallback(
     async (err: unknown, fallback: string) => {
@@ -467,6 +508,14 @@ export default function App() {
     setSearchDraft('');
     setSelectedIds([]);
   };
+
+  if (restoringSession) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[var(--bg-canvas)] text-[var(--text-secondary)] text-sm">
+        {t('pleaseWait')}
+      </div>
+    );
+  }
 
   if (!user) {
     return (

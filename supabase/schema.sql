@@ -361,6 +361,33 @@ begin
 end;
 $$;
 
+create or replace function public.lb_me(p_token text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  v_user_id uuid := public.lb_require_session(p_token);
+  v_username text;
+begin
+  select username into v_username
+  from public.users
+  where id = v_user_id
+  limit 1;
+
+  if v_username is null then
+    raise exception 'UNAUTHORIZED: Account not found';
+  end if;
+
+  update public.sessions
+  set expires_at = now() + interval '7 days'
+  where token_hash = public.lb_hash_token(p_token);
+
+  return jsonb_build_object('id', v_user_id, 'username', v_username);
+end;
+$$;
+
 create or replace function public.lb_change_password(
   p_token text,
   p_current_password text,
@@ -1049,6 +1076,7 @@ grant usage on schema public to anon, authenticated;
 grant execute on function public.lb_signup(text, text) to anon, authenticated;
 grant execute on function public.lb_login(text, text) to anon, authenticated;
 grant execute on function public.lb_logout(text) to anon, authenticated;
+grant execute on function public.lb_me(text) to anon, authenticated;
 grant execute on function public.lb_change_password(text, text, text) to anon, authenticated;
 grant execute on function public.lb_get_workspace(text) to anon, authenticated;
 grant execute on function public.lb_create_category(text, text, text) to anon, authenticated;

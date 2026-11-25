@@ -19,17 +19,60 @@ import {
 } from '../utils/logFormatters';
 import { SUPABASE_SETUP_SQL } from './supabaseSchema';
 
-let inMemoryToken: string | null = null;
+export const SESSION_TOKEN_STORAGE_KEY = 'logbook_session_token';
+const SESSION_USER_STORAGE_KEY = 'logbook_session_user';
+
+function readStoredToken(): { ok: boolean; value: string | null } {
+  try {
+    return { ok: true, value: localStorage.getItem(SESSION_TOKEN_STORAGE_KEY) };
+  } catch {
+    return { ok: false, value: null };
+  }
+}
+
+function readStoredUser(): UserSession | null {
+  try {
+    const raw = localStorage.getItem(SESSION_USER_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<UserSession>;
+    if (typeof parsed.id === 'string' && typeof parsed.username === 'string') {
+      return { id: parsed.id, username: parsed.username };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+let inMemoryToken: string | null = readStoredToken().value;
 let unauthorizedHandler: (() => void) | null = null;
 
 let cachedConfig: AppConfig | null = null;
 let cachedClient: SupabaseClient | null = null;
 
-export function setAuthToken(token: string | null): void {
+export function setAuthToken(token: string | null, user?: UserSession | null): void {
   inMemoryToken = token;
+  try {
+    if (token) {
+      if (user) {
+        localStorage.setItem(SESSION_USER_STORAGE_KEY, JSON.stringify(user));
+      }
+      localStorage.setItem(SESSION_TOKEN_STORAGE_KEY, token);
+    } else {
+      localStorage.removeItem(SESSION_TOKEN_STORAGE_KEY);
+      localStorage.removeItem(SESSION_USER_STORAGE_KEY);
+    }
+  } catch {
+    // ignore storage errors
+  }
 }
 
 export function getAuthToken(): string | null {
+  const stored = readStoredToken();
+  if (stored.ok) {
+    inMemoryToken = stored.value;
+    return stored.value;
+  }
   return inMemoryToken;
 }
 
@@ -131,8 +174,8 @@ function mapRpcError(
 
   if (msg.includes('UNAUTHORIZED:')) {
     const clean = msg.replace(/^.*UNAUTHORIZED:\s*/i, '').trim() || 'Session expired or invalid.';
+    setAuthToken(null);
     if (options.triggerUnauthorized && unauthorizedHandler) {
-      inMemoryToken = null;
       unauthorizedHandler();
     }
     throw new ApiError(clean, 401, 'UNAUTHORIZED');
@@ -172,11 +215,12 @@ async function callRpc<T>(
 }
 
 function requireToken(): string {
-  if (!inMemoryToken) {
+  const token = getAuthToken();
+  if (!token) {
     if (unauthorizedHandler) unauthorizedHandler();
     throw new ApiError('Missing session token', 401, 'UNAUTHORIZED');
   }
-  return inMemoryToken;
+  return token;
 }
 
 /* ---------------- Auth ---------------- */
@@ -192,7 +236,7 @@ export async function login(payload: {
     },
     { triggerUnauthorized: false }
   );
-  setAuthToken(res.token);
+  setAuthToken(res.token, res.user);
   return res;
 }
 
@@ -208,12 +252,59 @@ export async function signup(payload: {
     },
     { triggerUnauthorized: false }
   );
-  setAuthToken(res.token);
+  setAuthToken(res.token, res.user);
   return res;
 }
 
+export async function restoreSession(): Promise<UserSession | null> {
+  const token = getAuthToken();
+  if (!token) return null;
+
+  try {
+    const user = await callRpc<UserSession>(
+      'lb_me',
+      { p_token: token },
+      { triggerUnauthorized: false }
+    );
+    setAuthToken(token, user);
+    return user;
+  } catch (err) {
+    if (err instanceof ApiError && err.code === 'SCHEMA_MISSING') {
+      // Backward compatibility if lb_me has not been added to Supabase SQL Editor yet
+      const storedUser = readStoredUser();
+      if (!storedUser) {
+        setAuthToken(null);
+        return null;
+      }
+      try {
+        await callRpc<WorkspaceSnapshot>(
+          'lb_get_workspace',
+          { p_token: token },
+          { triggerUnauthorized: false }
+        );
+        return storedUser;
+      } catch (wsErr) {
+        if (wsErr instanceof ApiError && (wsErr.code === 'UNAUTHORIZED' || wsErr.code === 'SCHEMA_MISSING')) {
+          setAuthToken(null);
+          return null;
+        }
+        return storedUser;
+      }
+    }
+    if (err instanceof ApiError && err.code === 'UNAUTHORIZED') {
+      setAuthToken(null);
+      return null;
+    }
+    if (err instanceof ApiError && err.code === 'SUPABASE_NOT_CONFIGURED') {
+      return null;
+    }
+    // Preserve token on transient offline/network error, fallback to cached identity if present
+    return readStoredUser();
+  }
+}
+
 export async function logout(): Promise<void> {
-  const token = inMemoryToken;
+  const token = getAuthToken();
   setAuthToken(null);
   if (!token) return;
   try {
