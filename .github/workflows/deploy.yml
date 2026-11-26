@@ -43,7 +43,10 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.ARVAN_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.ARVAN_SECRET_KEY }}
           AWS_DEFAULT_REGION: default
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
         run: |
+          aws configure set default.s3.addressing_style path
           aws s3 sync ./dist s3://${{ secrets.ARVAN_BUCKET_NAME }} \
             --endpoint-url ${{ secrets.ARVAN_ENDPOINT }} \
             --acl public-read \
