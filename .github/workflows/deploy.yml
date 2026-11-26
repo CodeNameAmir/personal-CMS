@@ -33,10 +33,9 @@ jobs:
 
       - name: Build project
         run: npm run build
-        # اگر در فایل قبلی متغیرهای محیطی (مثل کلیدهای Supabase) داشتید، اینجا قرار دهید:
         env:
-            VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-            VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
 
       - name: Deploy to ArvanCloud Object Storage
         env:
