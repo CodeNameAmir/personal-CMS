@@ -1,13 +1,17 @@
 -- =============================================================================
 -- Logbook — Hardened Supabase PostgreSQL Schema & Secure RPCs
 -- For existing databases, run supabase/migrations/0001_security_hardening.sql
--- instead of resetting tables. For fresh installations, run this entire script
--- once in your Supabase Project -> SQL Editor.
+-- followed by supabase/migrations/0002_deep_security_hardening.sql instead of
+-- resetting tables. For fresh installations, run this entire script once in
+-- your Supabase Project -> SQL Editor.
 -- =============================================================================
 
 create extension if not exists pgcrypto;
 
--- Prevent future functions in public from becoming executable by default
+-- Lock down schema creation & future function execution privileges
+revoke create on schema public from public, anon, authenticated;
+grant usage on schema public to anon, authenticated;
+
 alter default privileges in schema public
   revoke execute on functions from public, anon, authenticated;
 
@@ -73,6 +77,19 @@ create table if not exists public.logs (
     foreign key (user_id, category_id)
     references public.categories(user_id, id)
 );
+
+do $$
+begin
+  if current_setting('server_version_num')::int >= 150000 then
+    alter table public.logs drop constraint if exists logs_user_category_fkey;
+    alter table public.logs
+      add constraint logs_user_category_fkey
+      foreign key (user_id, category_id)
+      references public.categories(user_id, id)
+      on delete set null (category_id);
+    alter table public.logs drop constraint if exists logs_category_id_fkey;
+  end if;
+end $$;
 
 create table if not exists public.log_tags (
   user_id uuid not null references public.users(id) on delete cascade,
@@ -145,7 +162,7 @@ returns text
 language sql
 immutable
 strict
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
   select encode(digest(convert_to(p_raw, 'UTF8'), 'sha256'), 'hex');
 $$;
@@ -154,7 +171,7 @@ create or replace function public.lb_is_valid_hex_color(p_color text)
 returns boolean
 language sql
 immutable
-set search_path = public
+set search_path = pg_catalog, public
 as $$
   select coalesce(p_color, '') ~ '^#[0-9a-fA-F]{6}$';
 $$;
@@ -163,7 +180,7 @@ create or replace function public.lb_normalize_username(p_raw text)
 returns text
 language sql
 immutable
-set search_path = public
+set search_path = pg_catalog, public
 as $$
   select lower(trim(coalesce(p_raw, '')));
 $$;
@@ -172,7 +189,7 @@ create or replace function public.lb_normalize_tag(p_raw text)
 returns text
 language sql
 immutable
-set search_path = public
+set search_path = pg_catalog, public
 as $$
   select left(
     regexp_replace(
@@ -194,7 +211,7 @@ create or replace function public.lb_default_tag_color(p_name text)
 returns text
 language plpgsql
 immutable
-set search_path = public
+set search_path = pg_catalog, public
 as $$
 declare
   v_palette text[] := array['#64748b', '#3b82f6', '#06b6d4', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#f97316'];
@@ -209,7 +226,7 @@ create or replace function public.lb_hash_password(p_password text)
 returns text
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_digest text;
@@ -223,7 +240,7 @@ create or replace function public.lb_verify_password(p_password text, p_stored_h
 returns boolean
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_digest text;
@@ -252,7 +269,7 @@ create or replace function public.lb_check_rate_limit(
 returns void
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_key_hash text := public.lb_hash_token(coalesce(p_scope, '') || ':' || coalesce(p_key, ''));
@@ -283,7 +300,7 @@ create or replace function public.lb_cleanup_expired_sessions(p_batch_size integ
 returns integer
 language plpgsql
 security definer
-set search_path = public
+set search_path = pg_catalog, public
 as $$
 declare
   v_limit int := least(10000, greatest(1, coalesce(p_batch_size, 1000)));
@@ -310,7 +327,7 @@ create or replace function public.lb_require_session(p_token text)
 returns uuid
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_trimmed text := trim(coalesce(p_token, ''));
@@ -338,7 +355,7 @@ create or replace function public.lb_hydrate_log(p_user_id uuid, p_log_id uuid)
 returns jsonb
 language sql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
   select jsonb_build_object(
     'id', l.id,
@@ -369,7 +386,7 @@ create or replace function public.lb_find_or_create_category(p_user_id uuid, p_n
 returns uuid
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_clean text := left(coalesce(nullif(trim(p_name), ''), 'General'), 64);
@@ -401,7 +418,7 @@ create or replace function public.lb_sync_log_tags(p_user_id uuid, p_log_id uuid
 returns void
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_raw text;
@@ -454,7 +471,7 @@ create or replace function public.lb_signup(p_username text, p_password text)
 returns jsonb
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_username text := public.lb_normalize_username(p_username);
@@ -468,7 +485,19 @@ begin
     raise exception 'Username may only contain lowercase letters, numbers, dots, underscores, and hyphens.';
   end if;
 
+  perform public.lb_check_rate_limit('signup_global', 'all', 30, 900);
+  perform public.lb_check_rate_limit('signup_global_daily', 'all', 200, 86400);
   perform public.lb_check_rate_limit('signup', v_username, 5, 900);
+
+  if random() < 0.02 then
+    delete from public.lb_rate_limits
+    where (scope, key_hash) in (
+      select scope, key_hash
+      from public.lb_rate_limits
+      where window_start < now() - interval '24 hours'
+      limit 50
+    );
+  end if;
 
   if p_password is null or char_length(p_password) < 12 or char_length(p_password) > 128 then
     raise exception 'Password must be between 12 and 128 characters.';
@@ -507,7 +536,7 @@ create or replace function public.lb_login(p_username text, p_password text)
 returns jsonb
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_username text := public.lb_normalize_username(p_username);
@@ -519,6 +548,16 @@ begin
   end if;
 
   perform public.lb_check_rate_limit('login', v_username, 12, 900);
+
+  if random() < 0.02 then
+    delete from public.lb_rate_limits
+    where (scope, key_hash) in (
+      select scope, key_hash
+      from public.lb_rate_limits
+      where window_start < now() - interval '24 hours'
+      limit 50
+    );
+  end if;
 
   if p_password is null or char_length(p_password) = 0 or char_length(p_password) > 128 then
     raise exception 'Invalid username or password.';
@@ -554,7 +593,7 @@ create or replace function public.lb_logout(p_token text)
 returns boolean
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_trimmed text := trim(coalesce(p_token, ''));
@@ -571,7 +610,7 @@ create or replace function public.lb_me(p_token text)
 returns jsonb
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_user_id uuid := public.lb_require_session(p_token);
@@ -603,7 +642,7 @@ create or replace function public.lb_change_password(
 returns jsonb
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_user_id uuid := public.lb_require_session(p_token);
@@ -654,7 +693,7 @@ create or replace function public.lb_get_workspace(
 returns jsonb
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_user_id uuid := public.lb_require_session(p_token);
@@ -894,7 +933,7 @@ create or replace function public.lb_export_logs(
 returns jsonb
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_user_id uuid := public.lb_require_session(p_token);
@@ -1005,7 +1044,7 @@ create or replace function public.lb_create_category(
 returns jsonb
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_user_id uuid := public.lb_require_session(p_token);
@@ -1047,7 +1086,7 @@ create or replace function public.lb_update_category(
 returns jsonb
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_user_id uuid := public.lb_require_session(p_token);
@@ -1091,11 +1130,15 @@ create or replace function public.lb_delete_category(p_token text, p_id uuid)
 returns boolean
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_user_id uuid := public.lb_require_session(p_token);
 begin
+  update public.logs
+  set category_id = null, updated_at = now()
+  where user_id = v_user_id and category_id = p_id;
+
   delete from public.categories where id = p_id and user_id = v_user_id;
   return found;
 end;
@@ -1109,7 +1152,7 @@ create or replace function public.lb_create_or_get_tag(
 returns jsonb
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_user_id uuid := public.lb_require_session(p_token);
@@ -1138,6 +1181,7 @@ begin
   if v_row.id is null then
     insert into public.tags (user_id, name, color)
     values (v_user_id, v_name, v_color)
+    on conflict (user_id, name) do update set name = excluded.name
     returning * into v_row;
   end if;
 
@@ -1159,7 +1203,7 @@ create or replace function public.lb_update_tag(
 returns jsonb
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_user_id uuid := public.lb_require_session(p_token);
@@ -1203,7 +1247,7 @@ create or replace function public.lb_delete_tag(p_token text, p_id uuid)
 returns boolean
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_user_id uuid := public.lb_require_session(p_token);
@@ -1225,7 +1269,7 @@ create or replace function public.lb_create_log(
 returns jsonb
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_user_id uuid := public.lb_require_session(p_token);
@@ -1275,7 +1319,7 @@ create or replace function public.lb_update_log(
 returns jsonb
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_user_id uuid := public.lb_require_session(p_token);
@@ -1340,7 +1384,7 @@ create or replace function public.lb_toggle_pin(p_token text, p_id uuid)
 returns jsonb
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_user_id uuid := public.lb_require_session(p_token);
@@ -1361,7 +1405,7 @@ create or replace function public.lb_delete_log(p_token text, p_id uuid)
 returns boolean
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_user_id uuid := public.lb_require_session(p_token);
@@ -1381,7 +1425,7 @@ create or replace function public.lb_bulk_logs_action(
 returns integer
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_user_id uuid := public.lb_require_session(p_token);
@@ -1430,7 +1474,7 @@ begin
   elsif p_action = 'add_tag' then
     v_clean_tag := public.lb_normalize_tag(p_tag);
     if length(v_clean_tag) = 0 then
-      return 0;
+      raise exception 'Tag name is required.';
     end if;
 
     select id into v_tag_id
@@ -1441,6 +1485,7 @@ begin
     if v_tag_id is null then
       insert into public.tags (user_id, name, color)
       values (v_user_id, v_clean_tag, public.lb_default_tag_color(v_clean_tag))
+      on conflict (user_id, name) do update set name = excluded.name
       returning id into v_tag_id;
     end if;
 
@@ -1464,15 +1509,19 @@ create or replace function public.lb_import_logs(p_token text, p_records jsonb)
 returns jsonb
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_user_id uuid := public.lb_require_session(p_token);
   v_item jsonb;
   v_msg text;
+  v_cat_json jsonb;
   v_cat_name text;
   v_cat_id uuid;
+  v_tags_json jsonb;
+  v_pinned_json jsonb;
   v_pinned boolean;
+  v_created_at_raw text;
   v_created_at timestamptz;
   v_tags text[];
   v_log_id uuid;
@@ -1515,14 +1564,29 @@ begin
       continue;
     end if;
 
-    if exists (select 1 from public.logs where user_id = v_user_id and message = v_msg) then
-      v_skipped := v_skipped + 1;
+    v_cat_json := v_item->'category';
+    if v_cat_json is not null and jsonb_typeof(v_cat_json) not in ('null', 'string') then
+      v_failed := v_failed + 1;
+      if coalesce(array_length(v_errors, 1), 0) < 20 then
+        v_errors := array_append(v_errors, 'Category must be a string');
+      end if;
+      continue;
+    end if;
+
+    v_tags_json := coalesce(v_item->'tags', '[]'::jsonb);
+    if jsonb_typeof(v_tags_json) = 'null' then
+      v_tags_json := '[]'::jsonb;
+    elsif jsonb_typeof(v_tags_json) <> 'array' then
+      v_failed := v_failed + 1;
+      if coalesce(array_length(v_errors, 1), 0) < 20 then
+        v_errors := array_append(v_errors, 'Tags must be an array of strings');
+      end if;
       continue;
     end if;
 
     select coalesce(array_agg(value::text), '{}')
     into v_tags
-    from jsonb_array_elements_text(coalesce(v_item->'tags', '[]'::jsonb));
+    from jsonb_array_elements_text(v_tags_json);
 
     if coalesce(array_length(v_tags, 1), 0) > 25 then
       v_failed := v_failed + 1;
@@ -1532,10 +1596,43 @@ begin
       continue;
     end if;
 
+    v_pinned_json := v_item->'pinned';
+    if v_pinned_json is null or jsonb_typeof(v_pinned_json) = 'null' then
+      v_pinned := false;
+    elsif jsonb_typeof(v_pinned_json) = 'boolean' then
+      v_pinned := (v_item->>'pinned')::boolean;
+    elsif jsonb_typeof(v_pinned_json) = 'string' and lower(trim(v_item->>'pinned')) in ('true', 'false') then
+      v_pinned := lower(trim(v_item->>'pinned')) = 'true';
+    else
+      v_failed := v_failed + 1;
+      if coalesce(array_length(v_errors, 1), 0) < 20 then
+        v_errors := array_append(v_errors, 'Invalid pinned boolean value');
+      end if;
+      continue;
+    end if;
+
+    v_created_at_raw := nullif(trim(coalesce(v_item->>'created_at', '')), '');
+    if v_created_at_raw is null then
+      v_created_at := now();
+    else
+      begin
+        v_created_at := v_created_at_raw::timestamptz;
+      exception when others then
+        v_failed := v_failed + 1;
+        if coalesce(array_length(v_errors, 1), 0) < 20 then
+          v_errors := array_append(v_errors, 'Invalid created_at timestamp');
+        end if;
+        continue;
+      end;
+    end if;
+
+    if exists (select 1 from public.logs where user_id = v_user_id and message = v_msg) then
+      v_skipped := v_skipped + 1;
+      continue;
+    end if;
+
     v_cat_name := left(coalesce(nullif(trim(v_item->>'category'), ''), 'General'), 64);
     v_cat_id := public.lb_find_or_create_category(v_user_id, v_cat_name);
-    v_pinned := coalesce((v_item->>'pinned')::boolean, false);
-    v_created_at := coalesce(nullif(v_item->>'created_at', '')::timestamptz, now());
 
     insert into public.logs (user_id, message, category_id, pinned, created_at, updated_at)
     values (v_user_id, v_msg, v_cat_id, v_pinned, v_created_at, v_created_at)
@@ -1559,7 +1656,7 @@ create or replace function public.lb_list_api_tokens(p_token text)
 returns jsonb
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_user_id uuid := public.lb_require_session(p_token);
@@ -1584,7 +1681,7 @@ create or replace function public.lb_create_api_token(p_token text, p_name text)
 returns jsonb
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_user_id uuid := public.lb_require_session(p_token);
@@ -1625,7 +1722,7 @@ create or replace function public.lb_delete_api_token(p_token text, p_id uuid)
 returns boolean
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_user_id uuid := public.lb_require_session(p_token);
@@ -1645,7 +1742,7 @@ create or replace function public.lb_ingest_webhook(
 returns jsonb
 language plpgsql
 security definer
-set search_path = public, extensions
+set search_path = pg_catalog, public, extensions
 as $$
 declare
   v_raw_token text := trim(coalesce(p_raw_token, ''));

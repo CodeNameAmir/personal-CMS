@@ -1,57 +1,76 @@
 # Security Summary
 
-This audit and remediation hardened the Logbook application across PostgreSQL/Supabase, the Express Backend-for-Frontend (BFF), and the React frontend while preserving all existing features, bilingual English/Persian UI, themes, and user data.
+**Reviewed Files**: 22
+**Issues Resolved**: 11
 
-## Key Remediations Implemented
+### Issues Resolved
+| Area | File | Line | What Was Happening | Impact | Status | How It Was Fixed |
+|---|---|---|---|---|---|---|
+| Reverse Proxy & Header Spoofing | `server/security.ts` & `server.ts` | 45, 918 | Express `trust proxy` defaulted to `1`, allowing unproxied deployments to trust attacker-supplied `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` headers. | High | Fixed | Changed `validateTrustProxy` / `parseTrustProxy` default to `false`, rejected `"true"`, validated hop/preset/IP-CIDR entries, and gated `X-Forwarded-*` checks behind `isProxyTrusted(req)`. |
+| Public Signup Anti-Abuse & Flood Protection | `server.ts`, `server/security.ts`, `supabase/migrations/0002_deep_security_hardening.sql` | 151, 366, 260 | Express BFF lacked configurable per-IP/global signup controls and static mode relied only on per-username limits, enabling arbitrary-username registration and bcrypt/DB exhaustion. | High | Fixed | Kept public signup enabled while adding configurable IP, username, and global burst caps in Express (`SIGNUP_RATE_LIMIT_*`) plus DB-level global burst/daily limits and probabilistic stale rate-limit cleanup in `lb_signup`. |
+| Unbounded In-Memory Rate Limiter Store | `server/security.ts` | 408 | `SlidingWindowRateLimiter` only evicted expired windows when full; active distributed key floods could exceed `maxEntries` and grow memory without bound. | High | Fixed | Rebuilt `SlidingWindowRateLimiter` as a strict memory-bounded LRU `Map` (`store.size <= maxEntries` invariant) with bounded expired-entry sweep followed by oldest-key LRU eviction. |
+| PostgreSQL Schema Creation & Function `search_path` | `supabase/migrations/0002_deep_security_hardening.sql` & `supabase/schema.sql` | 14, 145 | `CREATE` privilege on `schema public` was not explicitly revoked from `PUBLIC`/`anon`/`authenticated`, and function `search_path` lacked `pg_catalog` first. | Medium | Fixed | Added `REVOKE CREATE ON SCHEMA public FROM PUBLIC, anon, authenticated` and pinned `search_path = pg_catalog, public` (or `pg_catalog, public, extensions`) across all helper and RPC functions. |
+| Non-Empty Category Deletion Foreign Key Defect | `supabase/migrations/0002_deep_security_hardening.sql` & `supabase/schema.sql` | 35, 420 | Composite tenant foreign key `logs_user_category_fkey` had `NO ACTION` on delete, blocking deletion of any category containing logs. | Medium | Fixed | Added `ON DELETE SET NULL (category_id)` on PG 15+ and explicit per-user log `category_id = null` cleanup inside `lb_delete_category` for PG 14/15+ compatibility. |
+| Type Coercion, Content-Type & Bulk Input Validation | `server.ts` & `src/utils/logFormatters.ts` | 144, 542, 582 | Mutating endpoints accepted non-JSON `Content-Type` and non-object JSON payloads, coerced `"false"` via `Boolean("false")`, allowed stray `category_id` in non-category bulk requests, and silently fell back on invalid import `pinned`/`created_at`. | Medium | Fixed | Added `requireJsonContentType` (`415`), `requireBodyObject` (`400`), `parseStrictBoolean`, bulk field validation, and strict per-row boolean/timestamp validation in both `server.ts` and `logFormatters.ts`. |
+| Import RPC Transaction Abort & Tag Upsert Race | `supabase/migrations/0002_deep_security_hardening.sql` & `supabase/schema.sql` | 450, 505 | Non-array `tags`, non-boolean `pinned`, or malformed `created_at` aborted the entire `lb_import_logs` batch, and concurrent tag creation lacked `ON CONFLICT`. | Medium | Fixed | Added safe `jsonb_typeof` guards and per-row `created_at` exception handling in `lb_import_logs`, plus `ON CONFLICT (user_id, name) DO UPDATE` in `lb_create_or_get_tag` and `lb_bulk_logs_action`. |
+| Production Start Script & CI Lockfile Mismatch | `package.json` & `.github/workflows/deploy.yml` | 8, 25 | `npm start` failed with `ERR_MODULE_NOT_FOUND` under Node ESM, and GitHub Actions ran `npm ci` without `package-lock.json` and without test/lint/audit gates. | Medium | Fixed | Bundled `server.ts` into `dist-server/server.mjs` via `esbuild`, updated `npm start`, switched CI to `bun install --frozen-lockfile`, and added `lint`, `test`, and `bun audit` before deploy. |
+| Static Hosting Security Headers | `public/_headers` & `deploy/nginx-security.conf` | 1 | Static builds lacked documented security headers (`CSP`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`) for Cloudflare/Netlify/Nginx hosts. | Low | Fixed | Added `public/_headers` (copied into `dist/`), `deploy/nginx-security.conf`, and `Permissions-Policy` in `server.ts`. |
+| Unused Template Assets Bundled into Build Output | `public/assets/aistudio/*` | — | Unreferenced template/HTML/markdown files in `public/assets/aistudio/` were copied into `dist/assets/aistudio/`. | Low | Fixed | Deleted the unused `public/assets/aistudio/` files so only application assets ship in `dist/`. |
+| GitHub Actions Action Version Tags | `.github/workflows/deploy.yml` | 23 | GitHub Actions steps use floating major tags (`@v4`, `@v5`, `@v2`, `@v3`) instead of immutable commit SHAs. | Low | Needs Follow-Up | Offline environment prevented resolving upstream SHA hashes; pin action references to full commit SHAs after pushing. |
 
-1. **PostgreSQL Function Privileges & `SECURITY DEFINER` Isolation (`supabase/migrations/0001_security_hardening.sql`, `supabase/schema.sql`)**
-   - Configured `ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC, anon, authenticated` so future functions are never exposed by default.
-   - Revoked public execution from internal helpers (`lb_hash_token`, `lb_is_valid_hex_color`, `lb_normalize_username`, `lb_normalize_tag`, `lb_default_tag_color`, `lb_hash_password`, `lb_verify_password`, `lb_check_rate_limit`, `lb_require_session`, `lb_hydrate_log`, `lb_find_or_create_category`, `lb_sync_log_tags`), and restricted `lb_cleanup_expired_sessions` to `service_role`.
-   - Fixed `search_path = public, pg_catalog` and explicit schema qualification on every `SECURITY DEFINER` function.
-   - Added strict caller ownership checks inside `lb_hydrate_log(uuid, uuid)`, `lb_find_or_create_category(uuid, text)`, `lb_sync_log_tags(uuid, uuid, text[])`, `lb_create_log`, `lb_update_log`, and `lb_bulk_logs_action`.
-
-2. **Cross-Tenant Authorization & Database Integrity**
-   - Enforced composite foreign keys `(user_id, category_id) -> categories(user_id, id)` on `logs` and `(user_id, log_id)` / `(user_id, tag_id)` on `log_tags` (with safe backfill and orphaned cross-tenant cleanup in the migration).
-   - Validated case-insensitive unique usernames (`lower(username)`) safely before creating `idx_users_username_lower`.
-   - Added explicit `deny_direct_access` RLS policies and `REVOKE ALL` on every table in `public`.
-   - Updated `lb_bulk_logs_action`, `lb_create_log`, and `lb_update_log` to reject foreign/nonexistent `category_id` values instead of silently stripping them.
-
-3. **Authentication, Session Management & Password Hardening**
-   - Migrated Express-hosted authentication to `HttpOnly` cookie sessions (`lb_session`) with `Path=/`, `Max-Age=604800`, and `Secure; SameSite=None; Partitioned` over HTTPS (`SameSite=Lax` on local HTTP), removing all `localStorage` session token/user storage from `src/api/client.ts`.
-   - Updated `lb_change_password` to revoke all existing sessions and issue a rotated session token, updating the browser `HttpOnly` cookie automatically.
-   - Enforced 12–128 character passwords on signup and password change, pre-hashed passwords with SHA-256 before bcrypt cost-12 (`v2:` format) to eliminate bcrypt's 72-byte truncation limit, and preserved backward compatibility with legacy cost-10 hashes via transparent rehash on login.
-   - Removed per-request `DELETE FROM sessions` in `lb_require_session`, added `idx_sessions_expires_at`, and added `lb_cleanup_expired_sessions` plus a 6-hour background cleanup interval in `server.ts`.
-
-4. **Rate Limiting, CSRF, Security Headers & Input Validation**
-   - Added PostgreSQL rate limiting (`public.lb_rate_limits` + `lb_check_rate_limit`) and Express sliding-window rate limiting (`SlidingWindowRateLimiter`) returning HTTP `429` + `Retry-After` on login, signup, password change, token creation, bulk operations, imports, exports, and webhooks.
-   - Added CSRF middleware requiring `X-Requested-With: XMLHttpRequest` and `Origin`/`Referer` host verification on mutating cookie-authenticated BFF routes, while exempting Bearer-authenticated `/api/webhook`.
-   - Added `helmet` security headers (CSP, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, production HSTS), strict CORS without wildcard `*` on `/api/*`, bounded `trust proxy = 1`, payload size caps (`100 KB` default / `1 MB` import), and sanitized error responses.
-   - Enforced `#RRGGBB` hex color validation on database, server, and UI layers (`safeHexColor`), capped tags per log (25), log message length (10,000), bulk IDs (200), import rows (500), and strengthened CSV formula injection neutralization.
-
-5. **Server-Side Pagination & Scalability**
-   - Upgraded `lb_get_workspace` and `/api/workspace` to perform filtering, sorting, pagination (`1..100`), and SQL-aggregated `stats` server-side, eliminating N+1 hydration and unbounded client-side workspace loading.
-
----
+### Safeguards Verified
+| Area | File | How It's Protected |
+|---|---|---|
+| Session Storage & Cookies | `server/security.ts`, `src/api/client.ts` | BFF sessions use `HttpOnly` cookies (`SameSite=None; Secure; Partitioned` over trusted HTTPS, `SameSite=Lax` over HTTP); static fallback keeps tokens strictly in memory. |
+| CSRF & CORS Controls | `server/security.ts`, `server.ts` | Cookie-authenticated mutating requests verify `Origin`/`Referer` against an explicit allowlist or trusted `Host` plus `X-Requested-With: XMLHttpRequest`; strict CORS never uses `*`. |
+| Row-Level Security & Private Helpers | `supabase/schema.sql`, `supabase/migrations/0002_deep_security_hardening.sql` | Direct table access is denied to `anon`/`authenticated`/`PUBLIC` via RLS `deny_direct_access` and `REVOKE ALL`; internal `SECURITY DEFINER` helpers revoke `EXECUTE` from `PUBLIC`, `anon`, and `authenticated`. |
+| Password & Token Cryptography | `supabase/schema.sql` | Passwords use SHA-256 pre-hashed bcrypt (`v2:`, cost 12, 12–128 chars); session (`lbs_`) and webhook (`lbk_`) tokens are stored only as SHA-256 hashes. |
+| CSV Spreadsheet Injection | `src/utils/logFormatters.ts` | Formula prefixes (`=`, `+`, `-`, `@`, `\t`, `\r`, including after leading whitespace) are prefixed with `'` during CSV export. |
+| Error Sanitization | `server.ts`, `server/supabaseProxy.ts` | Internal SQL/stack errors map to generic `Internal server error.` (`500 INTERNAL_ERROR`) responses without leaking internal table or schema names. |
 
 ## PoC Verification
 
-### 1. Automated Unit & BFF Integration Suite (`node:test`)
-- **Command**: `npx --yes tsx --test src/utils/logFormatters.test.ts src/i18n/translations.test.ts server/security.test.ts`
-- **Coverage & Results (15/15 passing)**:
-  - Verified `HttpOnly`, `SameSite`, `Secure`, `Partitioned`, and `Max-Age` cookie attributes on signup/login/change-password/logout and confirmed raw tokens are never returned in JSON bodies.
-  - Verified CSRF rejection (`403 CSRF_REQUIRED` / `403 FORBIDDEN_ORIGIN`) on missing `X-Requested-With` or disallowed `Origin`/`Referer`, and confirmed `/api/webhook` works with `Authorization: Bearer lbk_...`.
-  - Verified HTTP `429` + `Retry-After` rate-limit enforcement on repeated login attempts.
-  - Verified rejection of weak passwords (`< 12` chars), invalid usernames, invalid UUIDs, invalid hex colors (`javascript:alert(1)`), oversized messages (`> 10,000`), excess tags (`> 25`), excess bulk IDs (`> 200`), malformed JSON, and sanitized `500` responses with zero stack/SQL leakage.
-  - Verified CSV formula injection neutralization (`=`, `+`, `-`, `@`, `\t`, leading whitespace) and import size/row limits.
+### Unverified Reverse Proxy Header Spoofing
+#### Summary
+| Field | Value |
+|---|---|
+| Issue Type | Trusted Proxy Default & Header Spoofing |
+| Impact | High |
+| Affected File | `server/security.ts:45`, `server.ts:918` |
+| Test Scenario | `POST /api/auth/login` with spoofed `X-Forwarded-Proto: https`, `X-Forwarded-Host: attacker.example`, `Origin: https://attacker.example`, and `X-Forwarded-For` IP rotation on `POST /api/auth/signup`. |
 
-### 2. Build, Type Check & Dependency Audit
-- `tsc --noEmit` (`npm run lint`): passed with 0 errors.
-- `vite build` (`npm run build`): passed cleanly.
-- `bun audit --json`: exited 0 with `{}` (0 known dependency vulnerabilities).
+#### How It Was Fixed
+Defaulted `TRUST_PROXY` parsing (`validateTrustProxy` / `parseTrustProxy`) to `false`, rejected `"true"`, and gated both `isHttpsRequest` and `isOriginAllowed` behind explicit Express `trust proxy` configuration (`isProxyTrusted(req)`).
 
-### 3. Headless Browser Verification (`playwright-cli` on `http://localhost:3000`)
-- Verified `GET /api/config` returns `bffEnabled: true` without exposing secret keys and includes `Content-Security-Policy` and `X-Content-Type-Options: nosniff`.
-- Verified unauthenticated `GET /api/workspace` returns HTTP `401`.
-- Verified `localStorage` contains no session tokens (`logbook_session_token` and `logbook_session_user` are `null`).
-- Verified English (LTR) and Persian (RTL) AuthScreen rendering and signup `minlength="12"` / `maxlength="128"` / username `maxlength="64"` attributes.
-- **Note**: Live PostgreSQL credentials are not present in this sandbox environment; therefore, executing `supabase/migrations/0001_security_hardening.sql` against the live Supabase project is documented in deployment instructions for the repository owner.
+#### Step-by-Step Trace
+| Step | What Happens in the Code | Outcome |
+|---|---|---|
+| 1 | Request with spoofed `X-Forwarded-*` headers arrives at default `createApp()`. | `app.get('trust proxy')` is `false`. |
+| 2 | `isOriginAllowed()` checks `isProxyTrusted(req)` (`server/security.ts:281`). | `X-Forwarded-Host` is ignored; `Origin` does not match `Host` and returns `403 FORBIDDEN_ORIGIN`. |
+| 3 | Without foreign `Origin`, `buildSessionCookieAttributes()` calls `isHttpsRequest(req)` (`server/security.ts:187`). | `X-Forwarded-Proto` is ignored over plain HTTP; cookie omits `Secure`. |
+| 4 | Rotated `X-Forwarded-For` headers hit `/api/auth/signup`. | `getClientIp(req)` uses actual socket IP; HTTP `429` triggers after the configured IP cap (`SIGNUP_RATE_LIMIT_IP_MAX`). |
+
+#### Conclusion
+**Fix Verified** — Automated integration tests confirm spoofed `X-Forwarded-Proto`, `X-Forwarded-Host`, and `X-Forwarded-For` headers are ignored unless a trusted proxy is explicitly configured.
+
+### Strict Boolean Coercion & Per-Row Import Resilience
+#### Summary
+| Field | Value |
+|---|---|
+| Issue Type | Improper Input Type Coercion & Batch Abort |
+| Impact | Medium |
+| Affected File | `server.ts:542,665,736,869`, `supabase/migrations/0002_deep_security_hardening.sql:505` |
+| Test Scenario | `POST /api/logs` and `POST /api/webhook` with `{"message":"hello","pinned":"false"}`; `parseImportJSON` and `lb_import_logs` with `pinned: "maybe"` and `created_at: "not-a-date"`. |
+
+#### How It Was Fixed
+Replaced truthy `Boolean(...)` coercion with `parseStrictBoolean` in `server.ts`, added strict boolean/timestamp error reporting in `src/utils/logFormatters.ts`, and added `jsonb_typeof` and exception-guarded `timestamptz` parsing inside `lb_import_logs`.
+
+#### Step-by-Step Trace
+| Step | What Happens in the Code | Outcome |
+|---|---|---|
+| 1 | `POST /api/logs` receives `{"message":"hello","pinned":"false"}`. | Passes `requireJsonContentType` and `requireBodyObject`. |
+| 2 | `parseStrictBoolean(body.pinned, false)` inspects `typeof value === 'boolean'` (`server/security.ts:112`). | Returns `{ ok: false }` instead of coercing `"false"` to `true`. |
+| 3 | Route throws `BffError('Pinned field must be a boolean.', 400, 'VALIDATION_ERROR')`. | Client receives HTTP `400`; valid import rows succeed while bad rows increment `failed`. |
+
+#### Conclusion
+**Fix Verified** — Automated server and formatter tests confirm `"false"` is rejected with HTTP `400` and malformed import rows fail cleanly per row.

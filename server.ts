@@ -7,8 +7,10 @@ import {
   clearSessionCookie,
   csrfProtectionMiddleware,
   getClientIp,
+  getRateLimitConfig,
   getSessionCookie,
   isOriginAllowed,
+  isPlainObject,
   isValidDateString,
   isValidHexColor,
   isValidUsername,
@@ -20,9 +22,13 @@ import {
   MAX_SEARCH_QUERY_LENGTH,
   MAX_TAGS_PER_LOG,
   normalizeUsername,
+  parseStrictBoolean,
+  parseTrustProxy,
+  requireJsonContentType,
   setSessionCookie,
   SlidingWindowRateLimiter,
   validatePassword,
+  type RateLimitStore,
 } from './server/security';
 import { BffError, callSupabaseRpc, getSupabaseServerConfig } from './server/supabaseProxy';
 
@@ -31,16 +37,8 @@ dotenv.config({ path: '.env.local', override: true });
 
 export interface CreateAppOptions {
   rpcCaller?: typeof callSupabaseRpc;
-  rateLimiter?: SlidingWindowRateLimiter;
-}
-
-function parseTrustProxy(): boolean | number | string {
-  const raw = (process.env.TRUST_PROXY || '').trim().toLowerCase();
-  if (raw === 'false' || raw === '0') return false;
-  if (raw === 'loopback' || raw === 'linklocal' || raw === 'uniquelocal') return raw;
-  const hops = Number(raw);
-  if (Number.isInteger(hops) && hops > 0 && hops <= 10) return hops;
-  return 1; // Trust single reverse-proxy hop by default (never arbitrary `true`)
+  rateLimiter?: RateLimitStore;
+  trustProxy?: string;
 }
 
 function parseTagsArray(input: unknown): string[] | null {
@@ -52,7 +50,14 @@ function parseTagsArray(input: unknown): string[] | null {
     const trimmed = item.trim();
     if (trimmed) out.push(trimmed.slice(0, 64));
   }
-  return out;
+  return Array.from(new Set(out));
+}
+
+function requireBodyObject(req: Request): Record<string, unknown> {
+  if (!isPlainObject(req.body)) {
+    throw new BffError('Request body must be a JSON object.', 400, 'VALIDATION_ERROR');
+  }
+  return req.body;
 }
 
 function requireSessionFromCookie(req: Request): string {
@@ -65,18 +70,17 @@ function requireSessionFromCookie(req: Request): string {
 
 export function createApiRouter(options: CreateAppOptions = {}): express.Router {
   const rpc = options.rpcCaller || callSupabaseRpc;
-  const limiter = options.rateLimiter || new SlidingWindowRateLimiter();
+  const limiter: RateLimitStore = options.rateLimiter || new SlidingWindowRateLimiter();
   const router = express.Router();
 
-  const enforceLimit = (
-    req: Request,
+  const enforceLimit = async (
     res: Response,
     scope: string,
     key: string,
     max: number,
     windowMs: number
-  ): boolean => {
-    const status = limiter.check(scope, key, max, windowMs);
+  ): Promise<boolean> => {
+    const status = await limiter.check(scope, key, max, windowMs);
     res.setHeader('X-RateLimit-Remaining', String(status.remaining));
     if (!status.allowed) {
       res.setHeader('Retry-After', String(status.retryAfterSec));
@@ -137,28 +141,34 @@ export function createApiRouter(options: CreateAppOptions = {}): express.Router 
   });
 
   /* ---------------- Auth ---------------- */
-  router.post('/auth/signup', async (req, res, next) => {
+  router.post('/auth/signup', requireJsonContentType, async (req, res, next) => {
     try {
+      const limits = getRateLimitConfig();
       const ip = getClientIp(req);
-      const username = normalizeUsername(req.body?.username);
-      if (!enforceLimit(req, res, 'signup_ip', ip, 10, 15 * 60_000)) return;
-      if (!enforceLimit(req, res, 'signup_user', username || 'empty', 5, 15 * 60_000)) return;
+      const body = requireBodyObject(req);
+      const username = normalizeUsername(body.username);
 
-      if (username.length < 2 || username.length > 64 || !isValidUsername(username)) {
+      if (!(await enforceLimit(res, 'signup_global', 'all', limits.signupGlobalMax, limits.signupGlobalWindowMs))) return;
+      if (!(await enforceLimit(res, 'signup_ip', ip, limits.signupIpMax, limits.signupIpWindowMs))) return;
+      if (!(await enforceLimit(res, 'signup_user', username || 'empty', limits.signupUserMax, limits.signupUserWindowMs))) {
+        return;
+      }
+
+      if (typeof body.username !== 'string' || username.length < 2 || username.length > 64 || !isValidUsername(username)) {
         throw new BffError(
           'Username must be 2–64 characters using lowercase letters, numbers, dots, underscores, or hyphens.',
           400,
           'VALIDATION_ERROR'
         );
       }
-      const pwError = validatePassword(req.body?.password);
+      const pwError = validatePassword(body.password);
       if (pwError) {
         throw new BffError(pwError, 400, 'VALIDATION_ERROR');
       }
 
       const result = await rpc<{ token: string; user: { id: string; username: string } }>('lb_signup', {
         p_username: username,
-        p_password: req.body.password,
+        p_password: body.password,
       });
 
       setSessionCookie(res, req, result.token);
@@ -168,15 +178,25 @@ export function createApiRouter(options: CreateAppOptions = {}): express.Router 
     }
   });
 
-  router.post('/auth/login', async (req, res, next) => {
+  router.post('/auth/login', requireJsonContentType, async (req, res, next) => {
     try {
+      const limits = getRateLimitConfig();
       const ip = getClientIp(req);
-      const username = normalizeUsername(req.body?.username);
-      if (!enforceLimit(req, res, 'login_ip', ip, 20, 15 * 60_000)) return;
-      if (!enforceLimit(req, res, 'login_user', username || 'empty', 12, 15 * 60_000)) return;
+      const body = requireBodyObject(req);
+      const username = normalizeUsername(body.username);
 
-      const password = req.body?.password;
-      if (!username || username.length > 64 || typeof password !== 'string' || !password || password.length > 128) {
+      if (!(await enforceLimit(res, 'login_ip', ip, limits.loginIpMax, 15 * 60_000))) return;
+      if (!(await enforceLimit(res, 'login_user', username || 'empty', limits.loginUserMax, 15 * 60_000))) return;
+
+      const password = body.password;
+      if (
+        typeof body.username !== 'string' ||
+        !username ||
+        username.length > 64 ||
+        typeof password !== 'string' ||
+        !password ||
+        password.length > 128
+      ) {
         throw new BffError('Invalid username or password.', 400, 'VALIDATION_ERROR');
       }
 
@@ -218,14 +238,15 @@ export function createApiRouter(options: CreateAppOptions = {}): express.Router 
     res.json({ ok: true });
   });
 
-  router.post('/auth/change-password', async (req, res, next) => {
+  router.post('/auth/change-password', requireJsonContentType, async (req, res, next) => {
     try {
       const token = requireSessionFromCookie(req);
       const ip = getClientIp(req);
-      if (!enforceLimit(req, res, 'change_pw', ip, 10, 15 * 60_000)) return;
+      if (!(await enforceLimit(res, 'change_pw', ip, 10, 15 * 60_000))) return;
 
-      const currentPassword = req.body?.currentPassword;
-      const newPassword = req.body?.newPassword;
+      const body = requireBodyObject(req);
+      const currentPassword = body.currentPassword;
+      const newPassword = body.newPassword;
       if (typeof currentPassword !== 'string' || !currentPassword || currentPassword.length > 128) {
         throw new BffError('Current password is required.', 400, 'VALIDATION_ERROR');
       }
@@ -303,7 +324,7 @@ export function createApiRouter(options: CreateAppOptions = {}): express.Router 
     try {
       const token = requireSessionFromCookie(req);
       const ip = getClientIp(req);
-      if (!enforceLimit(req, res, 'export', ip, 20, 5 * 60_000)) return;
+      if (!(await enforceLimit(res, 'export', ip, 20, 5 * 60_000))) return;
 
       const q = typeof req.query.q === 'string' ? req.query.q.slice(0, MAX_SEARCH_QUERY_LENGTH) : '';
       const categoryIdRaw = typeof req.query.categoryId === 'string' ? req.query.categoryId.trim() : '';
@@ -343,13 +364,21 @@ export function createApiRouter(options: CreateAppOptions = {}): express.Router 
   });
 
   /* ---------------- Categories ---------------- */
-  router.post('/categories', async (req, res, next) => {
+  router.post('/categories', requireJsonContentType, async (req, res, next) => {
     try {
       const token = requireSessionFromCookie(req);
-      const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
-      const color = typeof req.body?.color === 'string' ? req.body.color.trim() : '#3b82f6';
+      const body = requireBodyObject(req);
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      if (body.color !== undefined && body.color !== null && typeof body.color !== 'string') {
+        throw new BffError('Category color must be a valid #RRGGBB hex code.', 400, 'VALIDATION_ERROR');
+      }
+      const color = typeof body.color === 'string' && body.color.trim() ? body.color.trim() : '#3b82f6';
       if (!name || name.length > MAX_CATEGORY_NAME_LENGTH) {
-        throw new BffError(`Category name must be between 1 and ${MAX_CATEGORY_NAME_LENGTH} characters.`, 400, 'VALIDATION_ERROR');
+        throw new BffError(
+          `Category name must be between 1 and ${MAX_CATEGORY_NAME_LENGTH} characters.`,
+          400,
+          'VALIDATION_ERROR'
+        );
       }
       if (!isValidHexColor(color)) {
         throw new BffError('Category color must be a valid #RRGGBB hex code.', 400, 'VALIDATION_ERROR');
@@ -366,16 +395,24 @@ export function createApiRouter(options: CreateAppOptions = {}): express.Router 
     }
   });
 
-  router.patch('/categories/:id', async (req, res, next) => {
+  router.patch('/categories/:id', requireJsonContentType, async (req, res, next) => {
     try {
       const token = requireSessionFromCookie(req);
       if (!isValidUuid(req.params.id)) {
         throw new BffError('Invalid category ID.', 400, 'VALIDATION_ERROR');
       }
-      const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
-      const color = typeof req.body?.color === 'string' ? req.body.color.trim() : '#3b82f6';
+      const body = requireBodyObject(req);
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      if (body.color !== undefined && body.color !== null && typeof body.color !== 'string') {
+        throw new BffError('Category color must be a valid #RRGGBB hex code.', 400, 'VALIDATION_ERROR');
+      }
+      const color = typeof body.color === 'string' && body.color.trim() ? body.color.trim() : '#3b82f6';
       if (!name || name.length > MAX_CATEGORY_NAME_LENGTH) {
-        throw new BffError(`Category name must be between 1 and ${MAX_CATEGORY_NAME_LENGTH} characters.`, 400, 'VALIDATION_ERROR');
+        throw new BffError(
+          `Category name must be between 1 and ${MAX_CATEGORY_NAME_LENGTH} characters.`,
+          400,
+          'VALIDATION_ERROR'
+        );
       }
       if (!isValidHexColor(color)) {
         throw new BffError('Category color must be a valid #RRGGBB hex code.', 400, 'VALIDATION_ERROR');
@@ -407,11 +444,15 @@ export function createApiRouter(options: CreateAppOptions = {}): express.Router 
   });
 
   /* ---------------- Tags ---------------- */
-  router.post('/tags', async (req, res, next) => {
+  router.post('/tags', requireJsonContentType, async (req, res, next) => {
     try {
       const token = requireSessionFromCookie(req);
-      const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
-      const color = typeof req.body?.color === 'string' && req.body.color.trim() ? req.body.color.trim() : null;
+      const body = requireBodyObject(req);
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      if (body.color !== undefined && body.color !== null && typeof body.color !== 'string') {
+        throw new BffError('Tag color must be a valid #RRGGBB hex code.', 400, 'VALIDATION_ERROR');
+      }
+      const color = typeof body.color === 'string' && body.color.trim() ? body.color.trim() : null;
       if (!name || name.length > 64) {
         throw new BffError('Tag name is required.', 400, 'VALIDATION_ERROR');
       }
@@ -430,14 +471,18 @@ export function createApiRouter(options: CreateAppOptions = {}): express.Router 
     }
   });
 
-  router.patch('/tags/:id', async (req, res, next) => {
+  router.patch('/tags/:id', requireJsonContentType, async (req, res, next) => {
     try {
       const token = requireSessionFromCookie(req);
       if (!isValidUuid(req.params.id)) {
         throw new BffError('Invalid tag ID.', 400, 'VALIDATION_ERROR');
       }
-      const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
-      const color = typeof req.body?.color === 'string' ? req.body.color.trim() : '#64748b';
+      const body = requireBodyObject(req);
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      if (body.color !== undefined && body.color !== null && typeof body.color !== 'string') {
+        throw new BffError('Tag color must be a valid #RRGGBB hex code.', 400, 'VALIDATION_ERROR');
+      }
+      const color = typeof body.color === 'string' && body.color.trim() ? body.color.trim() : '#64748b';
       if (!name || name.length > 64) {
         throw new BffError('Tag name is required.', 400, 'VALIDATION_ERROR');
       }
@@ -471,10 +516,11 @@ export function createApiRouter(options: CreateAppOptions = {}): express.Router 
   });
 
   /* ---------------- Logs CRUD, Bulk & Import ---------------- */
-  router.post('/logs', async (req, res, next) => {
+  router.post('/logs', requireJsonContentType, async (req, res, next) => {
     try {
       const token = requireSessionFromCookie(req);
-      const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+      const body = requireBodyObject(req);
+      const message = typeof body.message === 'string' ? body.message.trim() : '';
       if (!message || message.length > MAX_LOG_MESSAGE_LENGTH) {
         throw new BffError(
           `Log message must be between 1 and ${MAX_LOG_MESSAGE_LENGTH.toLocaleString()} characters.`,
@@ -483,14 +529,19 @@ export function createApiRouter(options: CreateAppOptions = {}): express.Router 
         );
       }
 
-      const categoryId = req.body?.category_id ?? null;
+      const categoryId = body.category_id ?? null;
       if (categoryId !== null && !isValidUuid(categoryId)) {
         throw new BffError('Invalid category ID.', 400, 'VALIDATION_ERROR');
       }
 
-      const tags = parseTagsArray(req.body?.tags ?? []);
+      const tags = parseTagsArray(body.tags ?? []);
       if (tags === null) {
         throw new BffError(`Tags must be an array of at most ${MAX_TAGS_PER_LOG} strings.`, 400, 'VALIDATION_ERROR');
+      }
+
+      const parsedPinned = parseStrictBoolean(body.pinned, false);
+      if (!parsedPinned.ok) {
+        throw new BffError('Pinned field must be a boolean.', 400, 'VALIDATION_ERROR');
       }
 
       const log = await rpc('lb_create_log', {
@@ -498,7 +549,7 @@ export function createApiRouter(options: CreateAppOptions = {}): express.Router 
         p_message: message,
         p_category_id: categoryId,
         p_tags: tags,
-        p_pinned: Boolean(req.body?.pinned),
+        p_pinned: parsedPinned.value,
         p_created_at: null,
       });
       res.status(201).json(log);
@@ -507,13 +558,14 @@ export function createApiRouter(options: CreateAppOptions = {}): express.Router 
     }
   });
 
-  router.post('/logs/bulk', async (req, res, next) => {
+  router.post('/logs/bulk', requireJsonContentType, async (req, res, next) => {
     try {
       const token = requireSessionFromCookie(req);
       const ip = getClientIp(req);
-      if (!enforceLimit(req, res, 'bulk_ip', ip, 40, 60_000)) return;
+      if (!(await enforceLimit(res, 'bulk_ip', ip, 40, 60_000))) return;
 
-      const ids = req.body?.ids;
+      const body = requireBodyObject(req);
+      const ids = body.ids;
       if (!Array.isArray(ids) || ids.length === 0 || ids.length > MAX_BULK_IDS || !ids.every(isValidUuid)) {
         throw new BffError(
           `Bulk action requires between 1 and ${MAX_BULK_IDS} valid log IDs.`,
@@ -522,24 +574,31 @@ export function createApiRouter(options: CreateAppOptions = {}): express.Router 
         );
       }
 
-      const actionType = req.body?.type;
-      if (!['pin', 'unpin', 'delete', 'category', 'add_tag'].includes(actionType)) {
+      const actionType = body.type;
+      if (typeof actionType !== 'string' || !['pin', 'unpin', 'delete', 'category', 'add_tag'].includes(actionType)) {
         throw new BffError('Unsupported bulk action.', 400, 'VALIDATION_ERROR');
       }
 
-      const categoryId = req.body?.category_id ?? null;
+      const hasCategoryId = body.category_id !== undefined && body.category_id !== null;
+      if (actionType !== 'category' && hasCategoryId) {
+        throw new BffError('category_id is only allowed for category bulk actions.', 400, 'VALIDATION_ERROR');
+      }
+      const categoryId = actionType === 'category' ? (body.category_id ?? null) : null;
       if (actionType === 'category' && categoryId !== null && !isValidUuid(categoryId)) {
         throw new BffError('Invalid category ID.', 400, 'VALIDATION_ERROR');
       }
 
-      const tag = typeof req.body?.tag === 'string' ? req.body.tag.trim().slice(0, 64) : null;
+      const tag = typeof body.tag === 'string' ? body.tag.trim().slice(0, 64) : null;
+      if (actionType === 'add_tag' && (!tag || tag.length === 0)) {
+        throw new BffError('Tag name is required.', 400, 'VALIDATION_ERROR');
+      }
 
       const affected = await rpc<number>('lb_bulk_logs_action', {
         p_token: token,
         p_ids: ids,
         p_action: actionType,
         p_category_id: categoryId,
-        p_tag: tag,
+        p_tag: actionType === 'add_tag' ? tag : null,
       });
 
       res.json({ affected: affected ?? 0 });
@@ -548,13 +607,14 @@ export function createApiRouter(options: CreateAppOptions = {}): express.Router 
     }
   });
 
-  router.post('/logs/import', async (req, res, next) => {
+  router.post('/logs/import', requireJsonContentType, async (req, res, next) => {
     try {
       const token = requireSessionFromCookie(req);
       const ip = getClientIp(req);
-      if (!enforceLimit(req, res, 'import_ip', ip, 10, 5 * 60_000)) return;
+      if (!(await enforceLimit(res, 'import_ip', ip, 10, 5 * 60_000))) return;
 
-      const records = req.body?.records;
+      const body = requireBodyObject(req);
+      const records = body.records;
       if (!Array.isArray(records) || records.length === 0 || records.length > MAX_IMPORT_RECORDS) {
         throw new BffError(
           `Import requires between 1 and ${MAX_IMPORT_RECORDS} records per request.`,
@@ -563,9 +623,70 @@ export function createApiRouter(options: CreateAppOptions = {}): express.Router 
         );
       }
 
+      const sanitizedRecords: Array<{
+        message: string;
+        category: string;
+        tags: string[];
+        pinned: boolean;
+        created_at?: string;
+      }> = [];
+
+      for (let i = 0; i < records.length; i += 1) {
+        const rec = records[i];
+        if (!isPlainObject(rec)) {
+          throw new BffError(`Import record ${i + 1} must be an object.`, 400, 'VALIDATION_ERROR');
+        }
+        const message = typeof rec.message === 'string' ? rec.message.trim() : '';
+        if (!message || message.length > MAX_LOG_MESSAGE_LENGTH) {
+          throw new BffError(
+            `Import record ${i + 1}: message must be between 1 and ${MAX_LOG_MESSAGE_LENGTH.toLocaleString()} characters.`,
+            400,
+            'VALIDATION_ERROR'
+          );
+        }
+
+        if (rec.category !== undefined && rec.category !== null && typeof rec.category !== 'string') {
+          throw new BffError(`Import record ${i + 1}: category must be a string.`, 400, 'VALIDATION_ERROR');
+        }
+        const category =
+          typeof rec.category === 'string' && rec.category.trim()
+            ? rec.category.trim().slice(0, MAX_CATEGORY_NAME_LENGTH)
+            : 'General';
+
+        const tags = parseTagsArray(rec.tags ?? []);
+        if (tags === null) {
+          throw new BffError(
+            `Import record ${i + 1}: tags must be an array of at most ${MAX_TAGS_PER_LOG} strings.`,
+            400,
+            'VALIDATION_ERROR'
+          );
+        }
+
+        const parsedPinned = parseStrictBoolean(rec.pinned, false);
+        if (!parsedPinned.ok) {
+          throw new BffError(`Import record ${i + 1}: pinned must be a boolean.`, 400, 'VALIDATION_ERROR');
+        }
+
+        let createdAt: string | undefined;
+        if (rec.created_at !== undefined && rec.created_at !== null && rec.created_at !== '') {
+          if (typeof rec.created_at !== 'string' || Number.isNaN(Date.parse(rec.created_at))) {
+            throw new BffError(`Import record ${i + 1}: invalid created_at timestamp.`, 400, 'VALIDATION_ERROR');
+          }
+          createdAt = new Date(rec.created_at).toISOString();
+        }
+
+        sanitizedRecords.push({
+          message,
+          category,
+          tags,
+          pinned: parsedPinned.value,
+          ...(createdAt ? { created_at: createdAt } : {}),
+        });
+      }
+
       const result = await rpc('lb_import_logs', {
         p_token: token,
-        p_records: records,
+        p_records: sanitizedRecords,
       });
       res.json(result);
     } catch (err) {
@@ -573,18 +694,19 @@ export function createApiRouter(options: CreateAppOptions = {}): express.Router 
     }
   });
 
-  router.patch('/logs/:id', async (req, res, next) => {
+  router.patch('/logs/:id', requireJsonContentType, async (req, res, next) => {
     try {
       const token = requireSessionFromCookie(req);
       if (!isValidUuid(req.params.id)) {
         throw new BffError('Invalid log ID.', 400, 'VALIDATION_ERROR');
       }
+      const body = requireBodyObject(req);
 
       const message =
-        req.body?.message === undefined || req.body?.message === null
+        body.message === undefined || body.message === null
           ? null
-          : typeof req.body.message === 'string'
-            ? req.body.message.trim()
+          : typeof body.message === 'string'
+            ? body.message.trim()
             : '';
 
       if (message !== null && (!message || message.length > MAX_LOG_MESSAGE_LENGTH)) {
@@ -595,21 +717,28 @@ export function createApiRouter(options: CreateAppOptions = {}): express.Router 
         );
       }
 
-      const hasCategoryField = Object.prototype.hasOwnProperty.call(req.body || {}, 'category_id');
-      const categoryId = req.body?.category_id ?? null;
+      const hasCategoryField = Object.prototype.hasOwnProperty.call(body, 'category_id');
+      const categoryId = body.category_id ?? null;
       if (categoryId !== null && !isValidUuid(categoryId)) {
         throw new BffError('Invalid category ID.', 400, 'VALIDATION_ERROR');
       }
 
       let tags: string[] | null = null;
-      if (req.body?.tags !== undefined && req.body?.tags !== null) {
-        tags = parseTagsArray(req.body.tags);
+      if (body.tags !== undefined && body.tags !== null) {
+        tags = parseTagsArray(body.tags);
         if (tags === null) {
           throw new BffError(`Tags must be an array of at most ${MAX_TAGS_PER_LOG} strings.`, 400, 'VALIDATION_ERROR');
         }
       }
 
-      const pinned = typeof req.body?.pinned === 'boolean' ? req.body.pinned : null;
+      let pinned: boolean | null = null;
+      if (body.pinned !== undefined && body.pinned !== null) {
+        const parsedPinned = parseStrictBoolean(body.pinned);
+        if (!parsedPinned.ok) {
+          throw new BffError('Pinned field must be a boolean.', 400, 'VALIDATION_ERROR');
+        }
+        pinned = parsedPinned.value;
+      }
 
       const log = await rpc('lb_update_log', {
         p_token: token,
@@ -663,13 +792,14 @@ export function createApiRouter(options: CreateAppOptions = {}): express.Router 
     }
   });
 
-  router.post('/tokens', async (req, res, next) => {
+  router.post('/tokens', requireJsonContentType, async (req, res, next) => {
     try {
       const token = requireSessionFromCookie(req);
       const ip = getClientIp(req);
-      if (!enforceLimit(req, res, 'create_token_ip', ip, 15, 15 * 60_000)) return;
+      if (!(await enforceLimit(res, 'create_token_ip', ip, 15, 15 * 60_000))) return;
 
-      const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+      const body = requireBodyObject(req);
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
       if (!name || name.length > 64) {
         throw new BffError('Token name must be between 1 and 64 characters.', 400, 'VALIDATION_ERROR');
       }
@@ -693,22 +823,24 @@ export function createApiRouter(options: CreateAppOptions = {}): express.Router 
     }
   });
 
-  router.post('/webhook', async (req, res, next) => {
+  router.post('/webhook', requireJsonContentType, async (req, res, next) => {
     try {
+      const limits = getRateLimitConfig();
       const ip = getClientIp(req);
-      if (!enforceLimit(req, res, 'webhook_ip', ip, 120, 60_000)) return;
+      if (!(await enforceLimit(res, 'webhook_ip', ip, limits.webhookIpMax, 60_000))) return;
 
+      const body = requireBodyObject(req);
       const authHeader = typeof req.headers.authorization === 'string' ? req.headers.authorization : '';
       const bearerToken = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice(7).trim() : '';
       const headerKey = typeof req.headers['x-api-key'] === 'string' ? req.headers['x-api-key'].trim() : '';
-      const bodyToken = typeof req.body?.p_raw_token === 'string' ? req.body.p_raw_token.trim() : '';
+      const bodyToken = typeof body.p_raw_token === 'string' ? body.p_raw_token.trim() : '';
       const rawToken = bearerToken || headerKey || bodyToken;
 
       if (!rawToken || !rawToken.startsWith('lbk_') || rawToken.length < 16 || rawToken.length > 128) {
         throw new BffError('Missing or invalid API token.', 401, 'UNAUTHORIZED');
       }
 
-      const rawMsg = req.body?.message ?? req.body?.p_message;
+      const rawMsg = body.message ?? body.p_message;
       const message = typeof rawMsg === 'string' ? rawMsg.trim() : '';
       if (!message || message.length > MAX_LOG_MESSAGE_LENGTH) {
         throw new BffError(
@@ -718,26 +850,33 @@ export function createApiRouter(options: CreateAppOptions = {}): express.Router 
         );
       }
 
-      const rawCategory = req.body?.category ?? req.body?.p_category;
+      const rawCategory = body.category ?? body.p_category;
+      if (rawCategory !== undefined && rawCategory !== null && typeof rawCategory !== 'string') {
+        throw new BffError('Category must be a string.', 400, 'VALIDATION_ERROR');
+      }
       const category =
         typeof rawCategory === 'string' && rawCategory.trim()
           ? rawCategory.trim().slice(0, MAX_CATEGORY_NAME_LENGTH)
           : 'Webhook';
 
-      const rawTags = req.body?.tags ?? req.body?.p_tags ?? [];
+      const rawTags = body.tags ?? body.p_tags ?? [];
       const tags = parseTagsArray(rawTags);
       if (tags === null) {
         throw new BffError(`Tags must be an array of at most ${MAX_TAGS_PER_LOG} strings.`, 400, 'VALIDATION_ERROR');
       }
 
-      const pinned = Boolean(req.body?.pinned ?? req.body?.p_pinned ?? false);
+      const rawPinned = body.pinned !== undefined ? body.pinned : body.p_pinned;
+      const parsedPinned = parseStrictBoolean(rawPinned, false);
+      if (!parsedPinned.ok) {
+        throw new BffError('Pinned field must be a boolean.', 400, 'VALIDATION_ERROR');
+      }
 
       const data = await rpc('lb_ingest_webhook', {
         p_raw_token: rawToken,
         p_message: message,
         p_category: category,
         p_tags: tags,
-        p_pinned: pinned,
+        p_pinned: parsedPinned.value,
       });
 
       res.status(201).json(data);
@@ -776,7 +915,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   const isProd = process.env.NODE_ENV === 'production';
 
   app.disable('x-powered-by');
-  app.set('trust proxy', parseTrustProxy());
+  app.set('trust proxy', options.trustProxy !== undefined ? parseTrustProxy(options.trustProxy) : parseTrustProxy());
 
   const cfg = getSupabaseServerConfig();
   const supabaseOrigin = (() => {
@@ -786,6 +925,11 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       return '';
     }
   })();
+
+  app.use((_req, res, next) => {
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
+    next();
+  });
 
   app.use(
     helmet({

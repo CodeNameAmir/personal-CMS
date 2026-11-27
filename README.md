@@ -7,16 +7,16 @@ A fast, bilingual (**English LTR** & **Persian RTL**) structured log manager bui
 ## Features
 
 - **Dual-Mode Security Architecture**:
-  - **Express BFF Mode (`server.ts`)**: Stores sessions in `HttpOnly` cookies (`SameSite`, `Secure` over HTTPS), enforces CSRF protection (`Origin`/`Referer` verification + `X-Requested-With`), sliding-window rate limiting, Helmet CSP/security headers, strict CORS, and bounded request payloads.
-  - **Static Hosting Fallback**: Deployable as a static SPA to ArvanCloud Object Storage and GitHub Pages without exposing `localStorage` session tokens (keeps session tokens strictly in memory when no BFF is present) while relying on Supabase RLS-locked tables and hardened `SECURITY DEFINER` RPCs.
+  - **Express BFF Mode (`server.ts`)**: Stores sessions in `HttpOnly` cookies (`SameSite`, `Secure` over HTTPS), enforces CSRF protection (`Origin`/`Referer` verification + `X-Requested-With`), memory-bounded LRU rate limiting (with configurable IP/username/global signup protections), `Content-Type: application/json` enforcement, Helmet CSP/Permissions-Policy security headers, strict CORS, and bounded request payloads.
+  - **Static Hosting Fallback**: Deployable as a static SPA to ArvanCloud Object Storage and GitHub Pages without exposing `localStorage` session tokens (keeps session tokens strictly in memory when no BFF is present) while relying on Supabase RLS-locked tables, hardened `SECURITY DEFINER` RPCs, and `public/_headers` / `deploy/nginx-security.conf` security headers.
 - **Hardened PostgreSQL / Supabase Layer**:
-  - Row-Level Security (`RLS`) with explicit `deny_direct_access` policies and `REVOKE ALL` across all tables (`users`, `sessions`, `api_tokens`, `categories`, `tags`, `logs`, `log_tags`, `lb_rate_limits`).
-  - Locked-down `SECURITY DEFINER` functions with pinned `search_path`, ownership checks, composite tenant foreign keys, SHA-256 session/API token hashing, SHA-256 pre-hashed bcrypt (`v2:`, cost 12) password hashing (12–128 characters, backward-compatible with legacy hashes), and database-backed rate limiting.
+  - Row-Level Security (`RLS`) with explicit `deny_direct_access` policies, `REVOKE CREATE ON SCHEMA public`, and `REVOKE ALL` across all tables (`users`, `sessions`, `api_tokens`, `categories`, `tags`, `logs`, `log_tags`, `lb_rate_limits`).
+  - Locked-down `SECURITY DEFINER` functions with pinned `search_path = pg_catalog, public, extensions`, ownership checks, composite tenant foreign keys, SHA-256 session/API token hashing, SHA-256 pre-hashed bcrypt (`v2:`, cost 12) password hashing (12–128 characters, backward-compatible with legacy hashes), and database-backed rate limiting (including global signup flood protection).
 - **Server-Side Pagination & Analytics**: Filtering, search, sorting, pagination (`1..100` per page), and 30-day / category / tag dashboard statistics computed in PostgreSQL.
 - **Categories & Multi-Tagging**: Color-coded (`#RRGGBB` validated) categories and `#tags` with `Any` / `All` match modes and inline creation.
 - **Pinning & Bulk Actions**: Pin critical entries to the top of the feed and perform bulk pin, unpin, category move, tag assignment, or delete operations (capped at 200 items per request).
 - **Collapsible Sidebar**: Collapse the left/right sidebar on desktop into a compact rail to maximize horizontal reading space.
-- **Import & Export**: Import up to 500 records (1 MB max) and export up to 5,000 logs in **JSON** and **CSV** formats with spreadsheet formula-injection protection.
+- **Import & Export**: Import up to 500 records (1 MB max) and export up to 5,000 logs in **JSON** and **CSV** formats with spreadsheet formula-injection protection and strict boolean/timestamp validation.
 - **API Tokens & Webhooks**: Generate `lbk_...` API tokens and ingest automated logs via the Express BFF (`POST /api/webhook`) or directly via Supabase RPC (`POST /rest/v1/rpc/lb_ingest_webhook`).
 - **Bilingual & Multi-Theme**: Instant English (LTR) / Persian (RTL) switching plus Dark (Graphite), Midnight, and Light themes.
 
@@ -27,7 +27,8 @@ A fast, bilingual (**English LTR** & **Persian RTL**) structured log manager bui
 1. Create a project in [Supabase](https://supabase.com/).
 2. Open **SQL Editor** in your Supabase Dashboard:
    - **Fresh installation**: Run the full contents of [`supabase/schema.sql`](supabase/schema.sql).
-   - **Upgrading an existing database**: Run [`supabase/migrations/0001_security_hardening.sql`](supabase/migrations/0001_security_hardening.sql) (preserves existing user data while upgrading constraints, indexes, function privileges, rate limits, and password hashing).
+   - **Upgrading an existing database**: Run [`supabase/migrations/0001_security_hardening.sql`](supabase/migrations/0001_security_hardening.sql) followed by [`supabase/migrations/0002_deep_security_hardening.sql`](supabase/migrations/0002_deep_security_hardening.sql) (preserves existing user data while upgrading schema privileges, constraints, indexes, function `search_path`, DB signup flood limits, and import resilience).
+   - *(Optional verification)*: Run [`supabase/tests/security_verification.sql`](supabase/tests/security_verification.sql) against a staging database (wrapped in `BEGIN; ... ROLLBACK;`) to verify privilege lockdown and tenant isolation.
 3. From **Project Settings → API**, copy:
    - **Project URL** (`SUPABASE_URL` / `VITE_SUPABASE_URL`)
    - **Publishable / Anon Key** (`SUPABASE_PUBLISHABLE_KEY` / `VITE_SUPABASE_PUBLISHABLE_KEY`)
@@ -41,7 +42,9 @@ A fast, bilingual (**English LTR** & **Persian RTL**) structured log manager bui
 
 This repository includes:
 - [`public/CNAME`](public/CNAME) configured for `log.codenameamir.ir`
-- [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) (`Deploy to ArvanCloud & GitHub Pages`), which builds `./dist` with Node.js 20 (`npm ci` + `npm run build`), syncs the bundle to **ArvanCloud Object Storage**, and deploys to **GitHub Pages** on every push to `main` (or manual `workflow_dispatch`).
+- [`public/_headers`](public/_headers) for Cloudflare Pages / Netlify-compatible static security headers (`CSP`, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`)
+- [`deploy/nginx-security.conf`](deploy/nginx-security.conf) reference configuration for Nginx reverse-proxying (Express BFF) or static SPA serving
+- [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) (`Deploy to ArvanCloud & GitHub Pages`), which installs dependencies via `bun install --frozen-lockfile`, runs typechecks, unit/security tests, and `bun audit`, builds `./dist`, syncs `./dist` to **ArvanCloud Object Storage**, and deploys to **GitHub Pages** on every push to `main` (or manual `workflow_dispatch`).
 
 ### Configure Repository Secrets
 
@@ -64,6 +67,7 @@ Go to **Settings → Secrets and variables → Actions → New repository secret
 2. In your **ArvanCloud DNS / CDN** panel for `codenameamir.ir`:
    - Configure the `CNAME` record (`log` → target host) with SSL mode set to **Full** or **Full Strict** once certificates are active.
    - Use a short/bypassed CDN cache rule for `/index.html` and `/` while caching hashed `/assets/*` files.
+   - Configure ArvanCloud CDN **Response Header Rules** (since GitHub Pages and plain S3 buckets do not read `_headers`) to inject `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy`, and a strict `Content-Security-Policy` allowing only `'self'` and your Supabase URL in `connect-src`.
 
 > **Deployment Note**: Static deployments (ArvanCloud Object Storage / GitHub Pages) do not have a Node.js server to set `HttpOnly` cookies, so sessions remain strictly in memory (`inMemoryStaticToken`, cleared on page refresh). If you want persistent `HttpOnly` cookie sessions across page reloads, host the Express BFF (`server.ts`) on a Node.js runtime.
 
@@ -77,15 +81,17 @@ To run Logbook with `HttpOnly` cookie sessions, CSRF protection, and server-side
    - `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` (and optionally `VITE_SUPABASE_URL` / `VITE_SUPABASE_PUBLISHABLE_KEY`)
    - `SUPABASE_SECRET_KEY` *(optional, enables 6-hour background cleanup via `lb_cleanup_expired_sessions`)*
    - `ALLOWED_ORIGINS` *(comma-separated browser origins allowed by CORS/CSRF, e.g. `https://log.codenameamir.ir`)*
-   - `TRUST_PROXY=1` *(proxy hop count behind CDN/load balancer, or `false` if direct)*
+   - `TRUST_PROXY=false` *(secure default when exposed directly; set to `1`, `loopback`, or an explicit proxy IP/CIDR allowlist only behind a trusted reverse proxy such as Nginx or Cloudflare/ArvanCloud CDN; never set `"true"`)*
    - `COOKIE_SAME_SITE` *(optional override for HTTPS production: `lax`, `strict`, or default `none` with `Partitioned`)*
+   - Signup & auth rate-limit overrides *(all optional with safe defaults)*: `SIGNUP_RATE_LIMIT_IP_MAX` (`10`), `SIGNUP_RATE_LIMIT_IP_WINDOW_SEC` (`900`), `SIGNUP_RATE_LIMIT_USER_MAX` (`5`), `SIGNUP_RATE_LIMIT_USER_WINDOW_SEC` (`900`), `SIGNUP_RATE_LIMIT_GLOBAL_MAX` (`60`), `SIGNUP_RATE_LIMIT_GLOBAL_WINDOW_SEC` (`3600`), `LOGIN_RATE_LIMIT_IP_MAX` (`20`), `LOGIN_RATE_LIMIT_USER_MAX` (`12`), `WEBHOOK_RATE_LIMIT_IP_MAX` (`120`).
 2. Build and start:
 
 ```bash
-npm ci
+bun install --frozen-lockfile
 npm run lint
+npm test
 npm run build
-NODE_ENV=production npx tsx server.ts
+NODE_ENV=production npm start
 ```
 
 ---
@@ -129,7 +135,7 @@ curl -X POST "https://<YOUR_PROJECT>.supabase.co/rest/v1/rpc/lb_ingest_webhook" 
 ## 5. Local Development & Testing
 
 ```bash
-npm install
+bun install
 cp .env.example .env
 # Fill SUPABASE_URL / VITE_SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY / VITE_SUPABASE_PUBLISHABLE_KEY in .env
 npm run dev
@@ -138,7 +144,7 @@ npm run dev
 Run tests, type checks, and production build:
 
 ```bash
-npx tsx --test src/utils/logFormatters.test.ts src/i18n/translations.test.ts server/security.test.ts
+npm test
 npm run lint
 npm run build
 ```

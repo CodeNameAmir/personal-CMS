@@ -204,11 +204,26 @@ export function parseImportJSON(content: string): { records: ParsedImportRecord[
     }
 
     const uniqueTags = Array.from(new Set(tags)).slice(0, MAX_TAGS_PER_LOG);
-    const pinned = Boolean(obj.pinned === true || obj.pinned === 'true' || obj.pinned === 1 || obj.pinned === '1');
-    const created_at =
-      typeof obj.created_at === 'string' && !Number.isNaN(new Date(obj.created_at).getTime())
-        ? new Date(obj.created_at).toISOString()
-        : undefined;
+    let pinned = false;
+    if (obj.pinned !== undefined && obj.pinned !== null) {
+      if (typeof obj.pinned === 'boolean') {
+        pinned = obj.pinned;
+      } else if (typeof obj.pinned === 'string' && (obj.pinned.toLowerCase() === 'true' || obj.pinned.toLowerCase() === 'false')) {
+        pinned = obj.pinned.toLowerCase() === 'true';
+      } else {
+        errors.push(`Row ${idx + 1}: pinned must be a boolean`);
+        return;
+      }
+    }
+
+    let created_at: string | undefined;
+    if (obj.created_at !== undefined && obj.created_at !== null && obj.created_at !== '') {
+      if (typeof obj.created_at !== 'string' || Number.isNaN(new Date(obj.created_at).getTime())) {
+        errors.push(`Row ${idx + 1}: invalid created_at timestamp`);
+        return;
+      }
+      created_at = new Date(obj.created_at).toISOString();
+    }
 
     records.push({
       message,
@@ -330,11 +345,27 @@ export function parseImportCSV(content: string): { records: ParsedImportRecord[]
     ).slice(0, MAX_TAGS_PER_LOG);
 
     const pinnedRaw = pinnedIdx >= 0 ? (row[pinnedIdx] || '').trim().toLowerCase() : '';
-    const pinned = pinnedRaw === 'true' || pinnedRaw === '1' || pinnedRaw === 'yes';
+    let pinned = false;
+    if (pinnedRaw) {
+      if (pinnedRaw === 'true' || pinnedRaw === '1' || pinnedRaw === 'yes') {
+        pinned = true;
+      } else if (pinnedRaw === 'false' || pinnedRaw === '0' || pinnedRaw === 'no') {
+        pinned = false;
+      } else {
+        errors.push(`Row ${i + 1}: invalid pinned value`);
+        continue;
+      }
+    }
 
     const rawDate = createdIdx >= 0 ? (row[createdIdx] || '').trim() : '';
-    const created_at =
-      rawDate && !Number.isNaN(new Date(rawDate).getTime()) ? new Date(rawDate).toISOString() : undefined;
+    let created_at: string | undefined;
+    if (rawDate) {
+      if (Number.isNaN(new Date(rawDate).getTime())) {
+        errors.push(`Row ${i + 1}: invalid created_at timestamp`);
+        continue;
+      }
+      created_at = new Date(rawDate).toISOString();
+    }
 
     records.push({
       message,

@@ -178,3 +178,33 @@ test('parseImportJSON and parseImportCSV enforce size, record count, message len
   assert.equal(res.errors.length, 1);
   assert.match(res.errors[0], /exceeds 10,000 characters/);
 });
+
+test('parseImportJSON and parseImportCSV strictly validate pinned booleans and created_at timestamps per row', () => {
+  const jsonRes = parseImportJSON(
+    JSON.stringify([
+      { message: 'valid item', pinned: 'true', created_at: '2026-11-20T12:00:00.000Z' },
+      { message: 'bad pinned item', pinned: 'maybe' },
+      { message: 'bad date item', created_at: 'not-a-date' },
+    ])
+  );
+  assert.equal(jsonRes.records.length, 1);
+  assert.equal(jsonRes.records[0].pinned, true);
+  assert.equal(jsonRes.errors.length, 2);
+  assert.match(jsonRes.errors[0], /pinned/i);
+  assert.match(jsonRes.errors[1], /created_at/i);
+
+  const csvRes = parseImportCSV(
+    [
+      'message,category,tags,pinned,created_at',
+      '"valid csv row","API","prod",false,"2026-11-20T12:00:00.000Z"',
+      '"bad csv pinned","API","prod",invalid_bool,"2026-11-20T12:00:00.000Z"',
+      '"bad csv date","API","prod",true,"invalid-date"',
+    ].join('\n')
+  );
+  assert.equal(csvRes.records.length, 1);
+  assert.equal(csvRes.records[0].pinned, false);
+  assert.equal(csvRes.errors.length, 2);
+  assert.match(csvRes.errors[0], /pinned/i);
+  assert.match(csvRes.errors[1], /created_at/i);
+});
+

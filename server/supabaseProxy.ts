@@ -54,6 +54,7 @@ const SAFE_VALIDATION_MESSAGES = [
   'Category color must be a valid',
   'Category already exists.',
   'Category not found',
+  'Category not found or access denied.',
   'Tag name is required.',
   'Tag color must be a valid',
   'Tag already exists.',
