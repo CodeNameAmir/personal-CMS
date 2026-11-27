@@ -4,7 +4,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp, type CreateAppOptions } from '../server';
 import { BffError } from './supabaseProxy';
-import { SlidingWindowRateLimiter, validateTrustProxy } from './security';
+import { SlidingWindowRateLimiter, validatePassword, validateTrustProxy } from './security';
 
 type RpcCall = { fn: string; params: Record<string, unknown> };
 
@@ -412,13 +412,23 @@ test('Input validation rejects invalid types, non-JSON Content-Type, strict bool
       });
       assert.equal(stringPinnedWebhook.status, 400);
 
-      // Weak signup password (< 12 chars)
+      // Weak signup password (< 6 chars)
       const weakPw = await fetch(`${baseUrl}/api/auth/signup`, {
         method: 'POST',
         headers,
         body: JSON.stringify({ username: 'newuser', password: 'short' }),
       });
       assert.equal(weakPw.status, 400);
+
+      // 6-character signup password is accepted
+      assert.equal(validatePassword('12345'), 'Password must be between 6 and 128 characters.');
+      assert.equal(validatePassword('123456'), null);
+      const validShortPw = await fetch(`${baseUrl}/api/auth/signup`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ username: 'newuser6', password: 'abc123' }),
+      });
+      assert.notEqual(validShortPw.status, 400);
 
       // Invalid username
       const badUser = await fetch(`${baseUrl}/api/auth/signup`, {

@@ -499,8 +499,8 @@ begin
     );
   end if;
 
-  if p_password is null or char_length(p_password) < 12 or char_length(p_password) > 128 then
-    raise exception 'Password must be between 12 and 128 characters.';
+  if p_password is null or char_length(p_password) < 6 or char_length(p_password) > 128 then
+    raise exception 'Password must be between 6 and 128 characters.';
   end if;
 
   if exists (select 1 from public.users where lower(username) = v_username) then
@@ -651,8 +651,8 @@ declare
 begin
   perform public.lb_check_rate_limit('change_pw', v_user_id::text, 8, 900);
 
-  if p_new_password is null or char_length(p_new_password) < 12 or char_length(p_new_password) > 128 then
-    raise exception 'New password must be between 12 and 128 characters.';
+  if p_new_password is null or char_length(p_new_password) < 6 or char_length(p_new_password) > 128 then
+    raise exception 'New password must be between 6 and 128 characters.';
   end if;
 
   if p_current_password is null or char_length(p_current_password) > 128 then

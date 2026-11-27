@@ -5,6 +5,8 @@ export const MAX_CATEGORY_NAME_LENGTH = 64;
 export const MAX_TAGS_PER_LOG = 25;
 export const MAX_IMPORT_RECORDS = 500;
 export const MAX_IMPORT_BYTES = 1024 * 1024;
+export const MIN_PASSWORD_LENGTH = 6;
+export const MAX_PASSWORD_LENGTH = 128;
 
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
 

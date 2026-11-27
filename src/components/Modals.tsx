@@ -35,7 +35,9 @@ import {
   CATEGORY_PALETTE,
   MAX_CATEGORY_NAME_LENGTH,
   MAX_LOG_MESSAGE_LENGTH,
+  MAX_PASSWORD_LENGTH,
   MAX_TAGS_PER_LOG,
+  MIN_PASSWORD_LENGTH,
   TAG_PALETTE,
   formatExactTime,
   formatRelativeTime,
@@ -878,11 +880,11 @@ export const AccountModal: React.FC<AccountModalProps> = ({
     e.preventDefault();
     setMsg('');
     setErr('');
-    if (newPass.length < 12) {
+    if (newPass.length < MIN_PASSWORD_LENGTH) {
       setErr(t('passwordMinLength'));
       return;
     }
-    if (newPass.length > 128) {
+    if (newPass.length > MAX_PASSWORD_LENGTH) {
       setErr(t('passwordMaxLength'));
       return;
     }
@@ -1111,7 +1113,7 @@ export const AccountModal: React.FC<AccountModalProps> = ({
                   id="cp-cur"
                   type="password"
                   dir="ltr"
-                  maxLength={128}
+                  maxLength={MAX_PASSWORD_LENGTH}
                   value={currentPass}
                   onChange={(e) => setCurrentPass(e.target.value)}
                   required
@@ -1127,8 +1129,8 @@ export const AccountModal: React.FC<AccountModalProps> = ({
                     id="cp-new"
                     type="password"
                     dir="ltr"
-                    minLength={12}
-                    maxLength={128}
+                    minLength={MIN_PASSWORD_LENGTH}
+                    maxLength={MAX_PASSWORD_LENGTH}
                     value={newPass}
                     onChange={(e) => setNewPass(e.target.value)}
                     required
@@ -1143,8 +1145,8 @@ export const AccountModal: React.FC<AccountModalProps> = ({
                     id="cp-conf"
                     type="password"
                     dir="ltr"
-                    minLength={12}
-                    maxLength={128}
+                    minLength={MIN_PASSWORD_LENGTH}
+                    maxLength={MAX_PASSWORD_LENGTH}
                     value={confirmPass}
                     onChange={(e) => setConfirmPass(e.target.value)}
                     required
