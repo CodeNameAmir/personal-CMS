@@ -1,5 +1,23 @@
 import type { Category, DayStat, LogEntry, LogFilters, LogStats, TagStat } from '../types/logbook';
 
+export const MAX_LOG_MESSAGE_LENGTH = 10_000;
+export const MAX_CATEGORY_NAME_LENGTH = 64;
+export const MAX_TAGS_PER_LOG = 25;
+export const MAX_IMPORT_RECORDS = 500;
+export const MAX_IMPORT_BYTES = 1024 * 1024;
+
+const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
+
+export function isValidHexColor(color: string): boolean {
+  return HEX_COLOR_RE.test(color.trim());
+}
+
+export function safeHexColor(color: string | null | undefined, fallback = '#64748b'): string {
+  if (!color) return fallback;
+  const trimmed = color.trim();
+  return HEX_COLOR_RE.test(trimmed) ? trimmed : fallback;
+}
+
 export const CATEGORY_PALETTE = [
   '#3b82f6',
   '#10b981',
@@ -118,6 +136,10 @@ export interface ParsedImportRecord {
  * Parses JSON import payload (accepts either LogEntry[] or { logs: [...] }).
  */
 export function parseImportJSON(content: string): { records: ParsedImportRecord[]; errors: string[] } {
+  if (new Blob([content]).size > MAX_IMPORT_BYTES) {
+    return { records: [], errors: ['Import payload exceeds 1 MB limit'] };
+  }
+
   const errors: string[] = [];
   let parsed: unknown;
   try {
@@ -136,6 +158,13 @@ export function parseImportJSON(content: string): { records: ParsedImportRecord[
     return { records: [], errors: ['JSON must be an array of logs or an object with a "logs" array'] };
   }
 
+  if (rawItems.length > MAX_IMPORT_RECORDS) {
+    return {
+      records: [],
+      errors: [`Import is limited to ${MAX_IMPORT_RECORDS} records per request (found ${rawItems.length})`],
+    };
+  }
+
   const records: ParsedImportRecord[] = [];
   rawItems.forEach((item, idx) => {
     if (!item || typeof item !== 'object') {
@@ -146,6 +175,10 @@ export function parseImportJSON(content: string): { records: ParsedImportRecord[
     const message = typeof obj.message === 'string' ? obj.message.trim() : '';
     if (!message) {
       errors.push(`Row ${idx + 1}: missing message`);
+      return;
+    }
+    if (message.length > MAX_LOG_MESSAGE_LENGTH) {
+      errors.push(`Row ${idx + 1}: message exceeds ${MAX_LOG_MESSAGE_LENGTH.toLocaleString()} characters`);
       return;
     }
     const category =
@@ -170,6 +203,7 @@ export function parseImportJSON(content: string): { records: ParsedImportRecord[
       tags = parseTagInput(obj.tags);
     }
 
+    const uniqueTags = Array.from(new Set(tags)).slice(0, MAX_TAGS_PER_LOG);
     const pinned = Boolean(obj.pinned === true || obj.pinned === 'true' || obj.pinned === 1 || obj.pinned === '1');
     const created_at =
       typeof obj.created_at === 'string' && !Number.isNaN(new Date(obj.created_at).getTime())
@@ -178,8 +212,8 @@ export function parseImportJSON(content: string): { records: ParsedImportRecord[
 
     records.push({
       message,
-      category: category.slice(0, 64),
-      tags: Array.from(new Set(tags)),
+      category: category.slice(0, MAX_CATEGORY_NAME_LENGTH),
+      tags: uniqueTags,
       pinned,
       created_at,
     });
@@ -242,9 +276,20 @@ export function parseCSVRows(csvText: string): string[][] {
 }
 
 export function parseImportCSV(content: string): { records: ParsedImportRecord[]; errors: string[] } {
+  if (new Blob([content]).size > MAX_IMPORT_BYTES) {
+    return { records: [], errors: ['Import payload exceeds 1 MB limit'] };
+  }
+
   const rows = parseCSVRows(content);
   if (rows.length < 2) {
     return { records: [], errors: ['CSV must include a header row and at least one data row'] };
+  }
+
+  if (rows.length - 1 > MAX_IMPORT_RECORDS) {
+    return {
+      records: [],
+      errors: [`Import is limited to ${MAX_IMPORT_RECORDS} records per request (found ${rows.length - 1})`],
+    };
   }
 
   const headers = rows[0].map((h) => h.trim().toLowerCase());
@@ -268,13 +313,21 @@ export function parseImportCSV(content: string): { records: ParsedImportRecord[]
       errors.push(`Row ${i + 1}: empty message`);
       continue;
     }
+    if (message.length > MAX_LOG_MESSAGE_LENGTH) {
+      errors.push(`Row ${i + 1}: message exceeds ${MAX_LOG_MESSAGE_LENGTH.toLocaleString()} characters`);
+      continue;
+    }
 
     const category = (catIdx >= 0 ? row[catIdx] : '')?.trim() || 'General';
     const rawTags = tagsIdx >= 0 ? row[tagsIdx] || '' : '';
-    const tags = rawTags
-      .split(/[;|,]+/)
-      .map((t) => normalizeTagName(t))
-      .filter(Boolean);
+    const tags = Array.from(
+      new Set(
+        rawTags
+          .split(/[;|,]+/)
+          .map((t) => normalizeTagName(t))
+          .filter(Boolean)
+      )
+    ).slice(0, MAX_TAGS_PER_LOG);
 
     const pinnedRaw = pinnedIdx >= 0 ? (row[pinnedIdx] || '').trim().toLowerCase() : '';
     const pinned = pinnedRaw === 'true' || pinnedRaw === '1' || pinnedRaw === 'yes';
@@ -285,8 +338,8 @@ export function parseImportCSV(content: string): { records: ParsedImportRecord[]
 
     records.push({
       message,
-      category: category.slice(0, 64),
-      tags: Array.from(new Set(tags)),
+      category: category.slice(0, MAX_CATEGORY_NAME_LENGTH),
+      tags,
       pinned,
       created_at,
     });
@@ -296,8 +349,8 @@ export function parseImportCSV(content: string): { records: ParsedImportRecord[]
 }
 
 function escapeCSVCell(value: string): string {
-  // Guard against spreadsheet formula injection on export
-  const safe = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  // Guard against spreadsheet formula injection on export (including leading whitespace)
+  const safe = /^\s*[=+\-@\t\r]/.test(value) ? `'${value}` : value;
   if (/[",\n\r]/.test(safe)) {
     return `"${safe.replace(/"/g, '""')}"`;
   }

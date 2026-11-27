@@ -7,11 +7,14 @@ import type {
   ImportResult,
   LogEntry,
   LogFilters,
+  LogStats,
   Tag,
   UserSession,
+  WorkspaceQuery,
 } from '../types/logbook';
 import {
-  filterAndSortLogs,
+  MAX_IMPORT_BYTES,
+  MAX_IMPORT_RECORDS,
   parseImportCSV,
   parseImportJSON,
   serializeLogsToCSV,
@@ -19,61 +22,34 @@ import {
 } from '../utils/logFormatters';
 import { SUPABASE_SETUP_SQL } from './supabaseSchema';
 
-export const SESSION_TOKEN_STORAGE_KEY = 'logbook_session_token';
-const SESSION_USER_STORAGE_KEY = 'logbook_session_user';
-
-function readStoredToken(): { ok: boolean; value: string | null } {
-  try {
-    return { ok: true, value: localStorage.getItem(SESSION_TOKEN_STORAGE_KEY) };
-  } catch {
-    return { ok: false, value: null };
-  }
+// Clean up any legacy localStorage session artifacts from earlier builds
+try {
+  localStorage.removeItem('logbook_session_token');
+  localStorage.removeItem('logbook_session_user');
+} catch {
+  // ignore storage errors
 }
 
-function readStoredUser(): UserSession | null {
-  try {
-    const raw = localStorage.getItem(SESSION_USER_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<UserSession>;
-    if (typeof parsed.id === 'string' && typeof parsed.username === 'string') {
-      return { id: parsed.id, username: parsed.username };
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-let inMemoryToken: string | null = readStoredToken().value;
+// Used ONLY when running on static hosting without the Express BFF (never persisted to localStorage)
+let inMemoryStaticToken: string | null = null;
 let unauthorizedHandler: (() => void) | null = null;
 
 let cachedConfig: AppConfig | null = null;
 let cachedClient: SupabaseClient | null = null;
 
-export function setAuthToken(token: string | null, user?: UserSession | null): void {
-  inMemoryToken = token;
-  try {
-    if (token) {
-      if (user) {
-        localStorage.setItem(SESSION_USER_STORAGE_KEY, JSON.stringify(user));
-      }
-      localStorage.setItem(SESSION_TOKEN_STORAGE_KEY, token);
-    } else {
-      localStorage.removeItem(SESSION_TOKEN_STORAGE_KEY);
-      localStorage.removeItem(SESSION_USER_STORAGE_KEY);
-    }
-  } catch {
-    // ignore storage errors
-  }
-}
+const authBroadcast =
+  typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('logbook_auth_events') : null;
 
-export function getAuthToken(): string | null {
-  const stored = readStoredToken();
-  if (stored.ok) {
-    inMemoryToken = stored.value;
-    return stored.value;
-  }
-  return inMemoryToken;
+export function subscribeAuthEvents(onSignedOut: () => void): () => void {
+  if (!authBroadcast) return () => {};
+  const listener = (ev: MessageEvent) => {
+    if (ev.data === 'logout') {
+      inMemoryStaticToken = null;
+      onSignedOut();
+    }
+  };
+  authBroadcast.addEventListener('message', listener);
+  return () => authBroadcast.removeEventListener('message', listener);
 }
 
 export function setUnauthorizedHandler(handler: () => void): void {
@@ -99,6 +75,7 @@ function getBuildTimeConfig(): AppConfig {
     ''
   ).trim();
   return {
+    bffEnabled: false,
     supabaseUrl,
     supabasePublishableKey,
     supabaseConfigured: Boolean(supabaseUrl && supabasePublishableKey),
@@ -108,21 +85,16 @@ function getBuildTimeConfig(): AppConfig {
 export async function fetchConfig(): Promise<AppConfig> {
   if (cachedConfig) return cachedConfig;
 
-  const buildCfg = getBuildTimeConfig();
-  if (buildCfg.supabaseConfigured) {
-    cachedConfig = buildCfg;
-    return cachedConfig;
-  }
-
-  // Fallback for preview servers where secrets are configured server-side without VITE_ prefix
   try {
-    const res = await fetch('/api/config');
+    const res = await fetch('/api/config', { credentials: 'include' });
     const contentType = res.headers.get('content-type') || '';
     if (res.ok && contentType.includes('application/json')) {
       const data = (await res.json()) as Partial<AppConfig>;
-      const url = (data.supabaseUrl || '').trim();
-      const key = (data.supabasePublishableKey || '').trim();
+      const buildCfg = getBuildTimeConfig();
+      const url = (data.supabaseUrl || buildCfg.supabaseUrl || '').trim();
+      const key = (data.supabasePublishableKey || buildCfg.supabasePublishableKey || '').trim();
       cachedConfig = {
+        bffEnabled: data.bffEnabled !== false,
         supabaseUrl: url,
         supabasePublishableKey: key,
         supabaseConfigured: Boolean(url && key),
@@ -133,7 +105,7 @@ export async function fetchConfig(): Promise<AppConfig> {
     // Static hosts (GitHub Pages) will not have /api/config
   }
 
-  cachedConfig = buildCfg;
+  cachedConfig = getBuildTimeConfig();
   return cachedConfig;
 }
 
@@ -145,7 +117,7 @@ export async function fetchSupabaseSchema(): Promise<{ sql: string }> {
   return { sql: SUPABASE_SETUP_SQL };
 }
 
-async function getClient(): Promise<{ client: SupabaseClient; config: AppConfig }> {
+async function getStaticSupabaseClient(): Promise<{ client: SupabaseClient; config: AppConfig }> {
   const cfg = await fetchConfig();
   if (!cfg.supabaseConfigured) {
     throw new ApiError(
@@ -166,15 +138,20 @@ async function getClient(): Promise<{ client: SupabaseClient; config: AppConfig 
 }
 
 function mapRpcError(
-  err: { message?: string; code?: string; details?: string } | null,
+  err: { message?: string; code?: string } | null,
   options: { triggerUnauthorized?: boolean } = {}
 ): never {
   const msg = err?.message || 'Supabase request failed';
   const code = err?.code || '';
 
+  if (msg.includes('RATE_LIMITED:')) {
+    const clean = msg.replace(/^.*RATE_LIMITED:\s*/i, '').trim() || 'Too many requests. Please try again later.';
+    throw new ApiError(clean, 429, 'RATE_LIMITED');
+  }
+
   if (msg.includes('UNAUTHORIZED:')) {
     const clean = msg.replace(/^.*UNAUTHORIZED:\s*/i, '').trim() || 'Session expired or invalid.';
-    setAuthToken(null);
+    inMemoryStaticToken = null;
     if (options.triggerUnauthorized && unauthorizedHandler) {
       unauthorizedHandler();
     }
@@ -201,12 +178,12 @@ function mapRpcError(
   throw new ApiError(msg, 400, code || undefined);
 }
 
-async function callRpc<T>(
+async function callStaticRpc<T>(
   fn: string,
   params: Record<string, unknown>,
   options: { triggerUnauthorized?: boolean } = { triggerUnauthorized: true }
 ): Promise<T> {
-  const { client } = await getClient();
+  const { client } = await getStaticSupabaseClient();
   const { data, error } = await client.rpc(fn, params);
   if (error) {
     mapRpcError(error, options);
@@ -214,145 +191,244 @@ async function callRpc<T>(
   return data as T;
 }
 
-function requireToken(): string {
-  const token = getAuthToken();
-  if (!token) {
+async function callBff<T>(
+  path: string,
+  init: RequestInit = {},
+  options: { triggerUnauthorized?: boolean } = { triggerUnauthorized: true }
+): Promise<T> {
+  const headers = new Headers(init.headers);
+  if (init.method && init.method.toUpperCase() !== 'GET' && init.method.toUpperCase() !== 'HEAD') {
+    headers.set('X-Requested-With', 'XMLHttpRequest');
+  }
+  if (init.body && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+
+  const res = await fetch(path, {
+    ...init,
+    credentials: 'include',
+    headers,
+  });
+
+  const data = (await res.json().catch(() => null)) as { error?: string; code?: string } | null;
+
+  if (!res.ok) {
+    const code = data?.code;
+    const message = data?.error || res.statusText || 'Request failed';
+    if (res.status === 401) {
+      if (options.triggerUnauthorized && unauthorizedHandler) {
+        unauthorizedHandler();
+      }
+      throw new ApiError(message, 401, code || 'UNAUTHORIZED');
+    }
+    throw new ApiError(message, res.status, code);
+  }
+
+  return data as T;
+}
+
+function requireStaticToken(): string {
+  if (!inMemoryStaticToken) {
     if (unauthorizedHandler) unauthorizedHandler();
     throw new ApiError('Missing session token', 401, 'UNAUTHORIZED');
   }
-  return token;
+  return inMemoryStaticToken;
 }
 
 /* ---------------- Auth ---------------- */
 export async function login(payload: {
   username: string;
   password: string;
-}): Promise<{ token: string; user: UserSession }> {
-  const res = await callRpc<{ token: string; user: UserSession }>(
+}): Promise<{ user: UserSession }> {
+  const cfg = await fetchConfig();
+  if (cfg.bffEnabled) {
+    return callBff<{ user: UserSession }>(
+      '/api/auth/login',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+      { triggerUnauthorized: false }
+    );
+  }
+
+  const res = await callStaticRpc<{ token: string; user: UserSession }>(
     'lb_login',
-    {
-      p_username: payload.username,
-      p_password: payload.password,
-    },
+    { p_username: payload.username, p_password: payload.password },
     { triggerUnauthorized: false }
   );
-  setAuthToken(res.token, res.user);
-  return res;
+  inMemoryStaticToken = res.token;
+  return { user: res.user };
 }
 
 export async function signup(payload: {
   username: string;
   password: string;
-}): Promise<{ token: string; user: UserSession }> {
-  const res = await callRpc<{ token: string; user: UserSession }>(
+}): Promise<{ user: UserSession }> {
+  const cfg = await fetchConfig();
+  if (cfg.bffEnabled) {
+    return callBff<{ user: UserSession }>(
+      '/api/auth/signup',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+      { triggerUnauthorized: false }
+    );
+  }
+
+  const res = await callStaticRpc<{ token: string; user: UserSession }>(
     'lb_signup',
-    {
-      p_username: payload.username,
-      p_password: payload.password,
-    },
+    { p_username: payload.username, p_password: payload.password },
     { triggerUnauthorized: false }
   );
-  setAuthToken(res.token, res.user);
-  return res;
+  inMemoryStaticToken = res.token;
+  return { user: res.user };
 }
 
 export async function restoreSession(): Promise<UserSession | null> {
-  const token = getAuthToken();
-  if (!token) return null;
+  const cfg = await fetchConfig();
+  if (cfg.bffEnabled) {
+    if (!cfg.supabaseConfigured) return null;
+    try {
+      const res = await callBff<{ user: UserSession }>('/api/auth/me', {}, { triggerUnauthorized: false });
+      return res.user;
+    } catch {
+      return null;
+    }
+  }
 
+  if (!inMemoryStaticToken) return null;
   try {
-    const user = await callRpc<UserSession>(
+    return await callStaticRpc<UserSession>(
       'lb_me',
-      { p_token: token },
+      { p_token: inMemoryStaticToken },
       { triggerUnauthorized: false }
     );
-    setAuthToken(token, user);
-    return user;
-  } catch (err) {
-    if (err instanceof ApiError && err.code === 'SCHEMA_MISSING') {
-      // Backward compatibility if lb_me has not been added to Supabase SQL Editor yet
-      const storedUser = readStoredUser();
-      if (!storedUser) {
-        setAuthToken(null);
-        return null;
-      }
-      try {
-        await callRpc<WorkspaceSnapshot>(
-          'lb_get_workspace',
-          { p_token: token },
-          { triggerUnauthorized: false }
-        );
-        return storedUser;
-      } catch (wsErr) {
-        if (wsErr instanceof ApiError && (wsErr.code === 'UNAUTHORIZED' || wsErr.code === 'SCHEMA_MISSING')) {
-          setAuthToken(null);
-          return null;
-        }
-        return storedUser;
-      }
-    }
-    if (err instanceof ApiError && err.code === 'UNAUTHORIZED') {
-      setAuthToken(null);
-      return null;
-    }
-    if (err instanceof ApiError && err.code === 'SUPABASE_NOT_CONFIGURED') {
-      return null;
-    }
-    // Preserve token on transient offline/network error, fallback to cached identity if present
-    return readStoredUser();
+  } catch {
+    inMemoryStaticToken = null;
+    return null;
   }
 }
 
 export async function logout(): Promise<void> {
-  const token = getAuthToken();
-  setAuthToken(null);
+  const cfg = await fetchConfig();
+  authBroadcast?.postMessage('logout');
+
+  if (cfg.bffEnabled) {
+    try {
+      await callBff<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }, { triggerUnauthorized: false });
+    } catch {
+      // ignore errors during sign out
+    }
+    return;
+  }
+
+  const token = inMemoryStaticToken;
+  inMemoryStaticToken = null;
   if (!token) return;
   try {
-    await callRpc<boolean>('lb_logout', { p_token: token }, { triggerUnauthorized: false });
+    await callStaticRpc<boolean>('lb_logout', { p_token: token }, { triggerUnauthorized: false });
   } catch {
     // ignore errors during sign out
   }
 }
 
 export async function changePassword(currentPassword: string, newPassword: string): Promise<{ ok: boolean }> {
-  await callRpc<boolean>('lb_change_password', {
-    p_token: requireToken(),
+  const cfg = await fetchConfig();
+  if (cfg.bffEnabled) {
+    return callBff<{ ok: boolean }>('/api/auth/change-password', {
+      method: 'POST',
+      body: JSON.stringify({ currentPassword, newPassword }),
+    });
+  }
+
+  const res = await callStaticRpc<{ ok: boolean; token?: string }>('lb_change_password', {
+    p_token: requireStaticToken(),
     p_current_password: currentPassword,
     p_new_password: newPassword,
   });
+  if (res?.token) {
+    inMemoryStaticToken = res.token;
+  }
   return { ok: true };
 }
 
-/* ---------------- Workspace Snapshot ---------------- */
+/* ---------------- Workspace Snapshot (Server-Paginated) ---------------- */
 export interface WorkspaceSnapshot {
   categories: Category[];
   tags: Tag[];
   logs: LogEntry[];
+  total_count: number;
+  page: number;
+  page_size: number;
+  stats: LogStats;
 }
 
-export function fetchWorkspace(): Promise<WorkspaceSnapshot> {
-  return callRpc<WorkspaceSnapshot>('lb_get_workspace', {
-    p_token: requireToken(),
+export async function fetchWorkspace(query: WorkspaceQuery): Promise<WorkspaceSnapshot> {
+  const cfg = await fetchConfig();
+  if (cfg.bffEnabled) {
+    const params = new URLSearchParams({
+      page: String(query.page),
+      pageSize: String(query.pageSize),
+      q: query.q,
+      categoryId: query.categoryId,
+      tags: query.selectedTags.join(','),
+      tagMatchMode: query.tagMatchMode,
+      dateFrom: query.dateFrom,
+      pinnedOnly: String(query.pinnedOnly),
+    });
+    return callBff<WorkspaceSnapshot>(`/api/workspace?${params.toString()}`);
+  }
+
+  return callStaticRpc<WorkspaceSnapshot>('lb_get_workspace', {
+    p_token: requireStaticToken(),
+    p_page: query.page,
+    p_page_size: query.pageSize,
+    p_q: query.q,
+    p_category_id: query.categoryId || null,
+    p_tags: query.selectedTags,
+    p_tag_match_mode: query.tagMatchMode,
+    p_date_from: query.dateFrom || null,
+    p_pinned_only: query.pinnedOnly,
   });
 }
 
 /* ---------------- API Tokens & Webhook ---------------- */
-export function listApiTokens(): Promise<ApiTokenRecord[]> {
-  return callRpc<ApiTokenRecord[]>('lb_list_api_tokens', {
-    p_token: requireToken(),
+export async function listApiTokens(): Promise<ApiTokenRecord[]> {
+  const cfg = await fetchConfig();
+  if (cfg.bffEnabled) {
+    const res = await callBff<{ tokens: ApiTokenRecord[] }>('/api/tokens');
+    return res.tokens || [];
+  }
+  return callStaticRpc<ApiTokenRecord[]>('lb_list_api_tokens', {
+    p_token: requireStaticToken(),
   });
 }
 
-export function createApiToken(name: string): Promise<CreatedApiToken> {
-  return callRpc<CreatedApiToken>('lb_create_api_token', {
-    p_token: requireToken(),
+export async function createApiToken(name: string): Promise<CreatedApiToken> {
+  const cfg = await fetchConfig();
+  if (cfg.bffEnabled) {
+    return callBff<CreatedApiToken>('/api/tokens', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    });
+  }
+  return callStaticRpc<CreatedApiToken>('lb_create_api_token', {
+    p_token: requireStaticToken(),
     p_name: name,
   });
 }
 
 export async function deleteApiToken(id: string): Promise<{ ok: boolean }> {
-  await callRpc<boolean>('lb_delete_api_token', {
-    p_token: requireToken(),
+  const cfg = await fetchConfig();
+  if (cfg.bffEnabled) {
+    return callBff<{ ok: boolean }>(`/api/tokens/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  }
+  await callStaticRpc<boolean>('lb_delete_api_token', {
+    p_token: requireStaticToken(),
     p_id: id,
   });
   return { ok: true };
@@ -363,6 +439,25 @@ export async function sendWebhookLog(
   payload: { message: string; category?: string; tags?: string[]; pinned?: boolean }
 ): Promise<{ log: LogEntry }> {
   const cfg = await fetchConfig();
+  if (cfg.bffEnabled) {
+    return callBff<{ log: LogEntry }>(
+      '/api/webhook',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${rawToken}`,
+        },
+        body: JSON.stringify({
+          message: payload.message,
+          category: payload.category || 'Webhook',
+          tags: payload.tags || [],
+          pinned: Boolean(payload.pinned),
+        }),
+      },
+      { triggerUnauthorized: false }
+    );
+  }
+
   if (!cfg.supabaseConfigured) {
     throw new ApiError('Supabase is not configured.', 503);
   }
@@ -392,17 +487,31 @@ export async function sendWebhookLog(
 }
 
 /* ---------------- Categories ---------------- */
-export function createCategory(name: string, color: string): Promise<Category> {
-  return callRpc<Category>('lb_create_category', {
-    p_token: requireToken(),
+export async function createCategory(name: string, color: string): Promise<Category> {
+  const cfg = await fetchConfig();
+  if (cfg.bffEnabled) {
+    return callBff<Category>('/api/categories', {
+      method: 'POST',
+      body: JSON.stringify({ name, color }),
+    });
+  }
+  return callStaticRpc<Category>('lb_create_category', {
+    p_token: requireStaticToken(),
     p_name: name,
     p_color: color,
   });
 }
 
-export function updateCategory(id: string, name: string, color: string): Promise<Category> {
-  return callRpc<Category>('lb_update_category', {
-    p_token: requireToken(),
+export async function updateCategory(id: string, name: string, color: string): Promise<Category> {
+  const cfg = await fetchConfig();
+  if (cfg.bffEnabled) {
+    return callBff<Category>(`/api/categories/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name, color }),
+    });
+  }
+  return callStaticRpc<Category>('lb_update_category', {
+    p_token: requireStaticToken(),
     p_id: id,
     p_name: name,
     p_color: color,
@@ -410,25 +519,45 @@ export function updateCategory(id: string, name: string, color: string): Promise
 }
 
 export async function deleteCategory(id: string): Promise<{ ok: boolean }> {
-  await callRpc<boolean>('lb_delete_category', {
-    p_token: requireToken(),
+  const cfg = await fetchConfig();
+  if (cfg.bffEnabled) {
+    return callBff<{ ok: boolean }>(`/api/categories/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  }
+  await callStaticRpc<boolean>('lb_delete_category', {
+    p_token: requireStaticToken(),
     p_id: id,
   });
   return { ok: true };
 }
 
 /* ---------------- Tags ---------------- */
-export function createTag(name: string, color?: string): Promise<Tag> {
-  return callRpc<Tag>('lb_create_or_get_tag', {
-    p_token: requireToken(),
+export async function createTag(name: string, color?: string): Promise<Tag> {
+  const cfg = await fetchConfig();
+  if (cfg.bffEnabled) {
+    return callBff<Tag>('/api/tags', {
+      method: 'POST',
+      body: JSON.stringify({ name, color: color || null }),
+    });
+  }
+  return callStaticRpc<Tag>('lb_create_or_get_tag', {
+    p_token: requireStaticToken(),
     p_name: name,
     p_color: color || null,
   });
 }
 
-export function updateTag(id: string, name: string, color: string): Promise<Tag> {
-  return callRpc<Tag>('lb_update_tag', {
-    p_token: requireToken(),
+export async function updateTag(id: string, name: string, color: string): Promise<Tag> {
+  const cfg = await fetchConfig();
+  if (cfg.bffEnabled) {
+    return callBff<Tag>(`/api/tags/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name, color }),
+    });
+  }
+  return callStaticRpc<Tag>('lb_update_tag', {
+    p_token: requireStaticToken(),
     p_id: id,
     p_name: name,
     p_color: color,
@@ -436,22 +565,35 @@ export function updateTag(id: string, name: string, color: string): Promise<Tag>
 }
 
 export async function deleteTag(id: string): Promise<{ ok: boolean }> {
-  await callRpc<boolean>('lb_delete_tag', {
-    p_token: requireToken(),
+  const cfg = await fetchConfig();
+  if (cfg.bffEnabled) {
+    return callBff<{ ok: boolean }>(`/api/tags/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  }
+  await callStaticRpc<boolean>('lb_delete_tag', {
+    p_token: requireStaticToken(),
     p_id: id,
   });
   return { ok: true };
 }
 
 /* ---------------- Logs ---------------- */
-export function createLog(payload: {
+export async function createLog(payload: {
   message: string;
   category_id: string | null;
   tags: string[];
   pinned: boolean;
 }): Promise<LogEntry> {
-  return callRpc<LogEntry>('lb_create_log', {
-    p_token: requireToken(),
+  const cfg = await fetchConfig();
+  if (cfg.bffEnabled) {
+    return callBff<LogEntry>('/api/logs', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+  return callStaticRpc<LogEntry>('lb_create_log', {
+    p_token: requireStaticToken(),
     p_message: payload.message,
     p_category_id: payload.category_id || null,
     p_tags: payload.tags,
@@ -460,12 +602,19 @@ export function createLog(payload: {
   });
 }
 
-export function updateLog(
+export async function updateLog(
   id: string,
   payload: { message?: string; category_id?: string | null; tags?: string[]; pinned?: boolean }
 ): Promise<LogEntry> {
-  return callRpc<LogEntry>('lb_update_log', {
-    p_token: requireToken(),
+  const cfg = await fetchConfig();
+  if (cfg.bffEnabled) {
+    return callBff<LogEntry>(`/api/logs/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
+  }
+  return callStaticRpc<LogEntry>('lb_update_log', {
+    p_token: requireStaticToken(),
     p_id: id,
     p_message: payload.message ?? null,
     p_category_id: payload.category_id ?? null,
@@ -475,16 +624,28 @@ export function updateLog(
   });
 }
 
-export function togglePinLog(id: string): Promise<LogEntry> {
-  return callRpc<LogEntry>('lb_toggle_pin', {
-    p_token: requireToken(),
+export async function togglePinLog(id: string): Promise<LogEntry> {
+  const cfg = await fetchConfig();
+  if (cfg.bffEnabled) {
+    return callBff<LogEntry>(`/api/logs/${encodeURIComponent(id)}/toggle-pin`, {
+      method: 'POST',
+    });
+  }
+  return callStaticRpc<LogEntry>('lb_toggle_pin', {
+    p_token: requireStaticToken(),
     p_id: id,
   });
 }
 
 export async function deleteLog(id: string): Promise<{ ok: boolean }> {
-  await callRpc<boolean>('lb_delete_log', {
-    p_token: requireToken(),
+  const cfg = await fetchConfig();
+  if (cfg.bffEnabled) {
+    return callBff<{ ok: boolean }>(`/api/logs/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  }
+  await callStaticRpc<boolean>('lb_delete_log', {
+    p_token: requireStaticToken(),
     p_id: id,
   });
   return { ok: true };
@@ -496,8 +657,15 @@ export async function bulkLogsAction(payload: {
   category_id?: string | null;
   tag?: string;
 }): Promise<{ affected: number }> {
-  const affected = await callRpc<number>('lb_bulk_logs_action', {
-    p_token: requireToken(),
+  const cfg = await fetchConfig();
+  if (cfg.bffEnabled) {
+    return callBff<{ affected: number }>('/api/logs/bulk', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+  const affected = await callStaticRpc<number>('lb_bulk_logs_action', {
+    p_token: requireStaticToken(),
     p_ids: payload.ids,
     p_action: payload.type,
     p_category_id: payload.category_id ?? null,
@@ -507,15 +675,38 @@ export async function bulkLogsAction(payload: {
 }
 
 /* ---------------- Export & Import ---------------- */
-export function downloadExportLogs(
+export async function downloadExportLogs(
   format: 'json' | 'csv',
-  logs: LogEntry[],
   categories: Category[],
   filters: LogFilters
-): void {
-  const filtered = filterAndSortLogs(logs, filters);
-  const content =
-    format === 'csv' ? serializeLogsToCSV(filtered) : serializeLogsToJSON(filtered, categories);
+): Promise<void> {
+  const cfg = await fetchConfig();
+  let logs: LogEntry[];
+
+  if (cfg.bffEnabled) {
+    const params = new URLSearchParams({
+      q: filters.q,
+      categoryId: filters.categoryId,
+      tags: filters.selectedTags.join(','),
+      tagMatchMode: filters.tagMatchMode,
+      dateFrom: filters.dateFrom,
+      pinnedOnly: String(filters.pinnedOnly),
+    });
+    const res = await callBff<{ logs: LogEntry[] }>(`/api/logs/export?${params.toString()}`);
+    logs = res.logs || [];
+  } else {
+    logs = await callStaticRpc<LogEntry[]>('lb_export_logs', {
+      p_token: requireStaticToken(),
+      p_q: filters.q,
+      p_category_id: filters.categoryId || null,
+      p_tags: filters.selectedTags,
+      p_tag_match_mode: filters.tagMatchMode,
+      p_date_from: filters.dateFrom || null,
+      p_pinned_only: filters.pinnedOnly,
+    });
+  }
+
+  const content = format === 'csv' ? serializeLogsToCSV(logs) : serializeLogsToJSON(logs, categories);
   const mime = format === 'csv' ? 'text/csv;charset=utf-8' : 'application/json;charset=utf-8';
   const blob = new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);
@@ -532,9 +723,15 @@ export async function importLogs(
   format: 'json' | 'csv',
   input: { file?: File; content?: string }
 ): Promise<ImportResult> {
+  if (input.file && input.file.size > MAX_IMPORT_BYTES) {
+    throw new ApiError('Import file exceeds 1 MB limit.', 400);
+  }
   const raw = input.file ? await input.file.text() : input.content || '';
   if (!raw.trim()) {
     throw new ApiError('No import content provided.', 400);
+  }
+  if (new Blob([raw]).size > MAX_IMPORT_BYTES) {
+    throw new ApiError('Import payload exceeds 1 MB limit.', 400);
   }
 
   const parsed = format === 'csv' ? parseImportCSV(raw) : parseImportJSON(raw);
@@ -546,11 +743,20 @@ export async function importLogs(
       errors: parsed.errors.slice(0, 20),
     };
   }
+  if (parsed.records.length > MAX_IMPORT_RECORDS) {
+    throw new ApiError(`Import is limited to ${MAX_IMPORT_RECORDS} records per request.`, 400);
+  }
 
-  const res = await callRpc<ImportResult>('lb_import_logs', {
-    p_token: requireToken(),
-    p_records: parsed.records,
-  });
+  const cfg = await fetchConfig();
+  const res = cfg.bffEnabled
+    ? await callBff<ImportResult>('/api/logs/import', {
+        method: 'POST',
+        body: JSON.stringify({ records: parsed.records }),
+      })
+    : await callStaticRpc<ImportResult>('lb_import_logs', {
+        p_token: requireStaticToken(),
+        p_records: parsed.records,
+      });
 
   return {
     imported: res.imported || 0,

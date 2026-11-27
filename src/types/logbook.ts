@@ -41,6 +41,11 @@ export interface LogFilters {
   pinnedOnly: boolean;
 }
 
+export interface WorkspaceQuery extends LogFilters {
+  page: number;
+  pageSize: number;
+}
+
 export interface CategoryStat {
   category_id: string;
   category_name: string;
@@ -83,6 +88,7 @@ export interface UserSession {
 }
 
 export interface AppConfig {
+  bffEnabled: boolean;
   supabaseUrl: string;
   supabasePublishableKey: string;
   supabaseConfigured: boolean;

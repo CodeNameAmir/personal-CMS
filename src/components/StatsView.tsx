@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { getTranslator } from '../i18n/translations';
 import type { Language, LogStats } from '../types/logbook';
+import { safeHexColor } from '../utils/logFormatters';
 
 interface StatsViewProps {
   lang: Language;
@@ -158,7 +159,7 @@ export const StatsView: React.FC<StatsViewProps> = ({
                       <span className="flex items-center gap-2 font-medium text-[var(--text-primary)] group-hover:text-[var(--accent)] transition-colors">
                         <span
                           className="w-2 h-2 rounded-full shrink-0"
-                          style={{ backgroundColor: cat.category_color }}
+                          style={{ backgroundColor: safeHexColor(cat.category_color) }}
                         />
                         <span className="truncate">{cat.category_name}</span>
                       </span>
@@ -169,7 +170,7 @@ export const StatsView: React.FC<StatsViewProps> = ({
                     <div className="h-1.5 w-full rounded-full bg-[var(--bg-elevated)] overflow-hidden">
                       <div
                         className="h-full rounded-full transition-all"
-                        style={{ width: `${widthPct}%`, backgroundColor: cat.category_color }}
+                        style={{ width: `${widthPct}%`, backgroundColor: safeHexColor(cat.category_color) }}
                       />
                     </div>
                   </button>
@@ -203,7 +204,7 @@ export const StatsView: React.FC<StatsViewProps> = ({
                 >
                   <div className="flex items-center justify-between text-xs mb-1.5">
                     <span dir="ltr" className="font-mono font-medium text-[var(--text-primary)] group-hover:text-[var(--accent)] truncate transition-colors">
-                      <span style={{ color: tag.tag_color }}>#</span>
+                      <span style={{ color: safeHexColor(tag.tag_color) }}>#</span>
                       {tag.tag_name}
                     </span>
                     <span className="font-mono tabular-nums text-[var(--text-secondary)]">
@@ -213,7 +214,7 @@ export const StatsView: React.FC<StatsViewProps> = ({
                   <div className="h-1 w-full rounded-full bg-[var(--bg-elevated)] overflow-hidden">
                     <div
                       className="h-full rounded-full"
-                      style={{ width: `${widthPct}%`, backgroundColor: tag.tag_color }}
+                      style={{ width: `${widthPct}%`, backgroundColor: safeHexColor(tag.tag_color) }}
                     />
                   </div>
                 </button>

@@ -26,13 +26,11 @@ import {
   downloadExportLogs,
   fetchSupabaseSchema,
   fetchWorkspace,
-  getAuthToken,
   importLogs,
   logout,
   restoreSession,
-  SESSION_TOKEN_STORAGE_KEY,
-  setAuthToken,
   setUnauthorizedHandler,
+  subscribeAuthEvents,
   togglePinLog,
   updateCategory,
   updateLog,
@@ -56,11 +54,11 @@ import type {
   Language,
   LogEntry,
   LogFilters,
+  LogStats,
   Tag,
   ThemeId,
   UserSession,
 } from './types/logbook';
-import { computeLogStats, filterAndSortLogs } from './utils/logFormatters';
 
 const EMPTY_FILTERS: LogFilters = {
   q: '',
@@ -140,13 +138,15 @@ export default function App() {
   };
 
   const [user, setUser] = useState<UserSession | null>(null);
-  const [restoringSession, setRestoringSession] = useState<boolean>(() => Boolean(getAuthToken()));
+  const [restoringSession, setRestoringSession] = useState<boolean>(true);
   const [activeTab, setActiveTab] = useState<'logs' | 'stats'>('logs');
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   const [categories, setCategories] = useState<Category[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
-  const [allLogs, setAllLogs] = useState<LogEntry[]>([]);
+  const [pagedLogs, setPagedLogs] = useState<LogEntry[]>([]);
+  const [totalLogsCount, setTotalLogsCount] = useState<number>(0);
+  const [stats, setStats] = useState<LogStats | null>(null);
   const [loadingLogs, setLoadingLogs] = useState(false);
 
   const [filters, setFilters] = useState<LogFilters>(EMPTY_FILTERS);
@@ -182,14 +182,16 @@ export default function App() {
   useEffect(() => {
     setUnauthorizedHandler(() => {
       setUser(null);
-      setAllLogs([]);
+      setPagedLogs([]);
+      setTotalLogsCount(0);
+      setStats(null);
       setCategories([]);
       setTags([]);
       pushToast(getTranslator(lang)('sessionExpired'), 'error');
     });
   }, [pushToast, lang]);
 
-  // Restore session on page refresh or when opening a new tab
+  // Restore HttpOnly cookie session on page load & sync sign-out across tabs
   useEffect(() => {
     let active = true;
     restoreSession()
@@ -201,24 +203,18 @@ export default function App() {
         if (active) setRestoringSession(false);
       });
 
-    const onStorage = (e: StorageEvent) => {
-      if (e.key !== SESSION_TOKEN_STORAGE_KEY && e.key !== null) return;
-      if (!e.newValue) {
-        setAuthToken(null);
-        setUser(null);
-        setAllLogs([]);
-        setCategories([]);
-        setTags([]);
-      } else {
-        restoreSession().then((resumedUser) => {
-          if (resumedUser) setUser(resumedUser);
-        });
-      }
-    };
-    window.addEventListener('storage', onStorage);
+    const unsubscribe = subscribeAuthEvents(() => {
+      setUser(null);
+      setPagedLogs([]);
+      setTotalLogsCount(0);
+      setStats(null);
+      setCategories([]);
+      setTags([]);
+    });
+
     return () => {
       active = false;
-      window.removeEventListener('storage', onStorage);
+      unsubscribe();
     };
   }, []);
 
@@ -241,16 +237,22 @@ export default function App() {
     if (!user) return;
     setLoadingLogs(true);
     try {
-      const snapshot = await fetchWorkspace();
+      const snapshot = await fetchWorkspace({
+        ...filters,
+        page,
+        pageSize,
+      });
       setCategories(snapshot.categories || []);
       setTags(snapshot.tags || []);
-      setAllLogs(snapshot.logs || []);
+      setPagedLogs(snapshot.logs || []);
+      setTotalLogsCount(snapshot.total_count ?? (snapshot.logs ? snapshot.logs.length : 0));
+      setStats(snapshot.stats || null);
     } catch (err) {
       await handleApiError(err, 'Failed to load workspace data');
     } finally {
       setLoadingLogs(false);
     }
-  }, [user, handleApiError]);
+  }, [user, filters, page, pageSize, handleApiError]);
 
   useEffect(() => {
     if (user) {
@@ -258,20 +260,11 @@ export default function App() {
     }
   }, [user, loadWorkspaceData]);
 
-  // Derived filtered logs, pagination, and stats from single consistent workspace snapshot
-  const filteredLogs = useMemo(() => filterAndSortLogs(allLogs, filters), [allLogs, filters]);
-  const pagedLogs = useMemo(() => {
-    const start = (page - 1) * pageSize;
-    return filteredLogs.slice(start, start + pageSize);
-  }, [filteredLogs, page, pageSize]);
-
-  const stats = useMemo(() => computeLogStats(allLogs, categories), [allLogs, categories]);
-
-  // Clamp page if filtered length shrinks
+  // Clamp page if filtered total shrinks
   useEffect(() => {
-    const maxPage = Math.max(1, Math.ceil(filteredLogs.length / pageSize));
+    const maxPage = Math.max(1, Math.ceil(totalLogsCount / pageSize));
     if (page > maxPage) setPage(maxPage);
-  }, [filteredLogs.length, page, pageSize]);
+  }, [totalLogsCount, page, pageSize]);
 
   // Debounce search input
   useEffect(() => {
@@ -487,13 +480,13 @@ export default function App() {
     return res;
   };
 
-  const handleExport = (format: 'json' | 'csv') => {
+  const handleExport = async (format: 'json' | 'csv') => {
     setDataMenuOpen(false);
     try {
-      downloadExportLogs(format, allLogs, categories, filters);
+      await downloadExportLogs(format, categories, filters);
       pushToast(`${t('exportedLabel')} ${format.toUpperCase()}`, 'ok');
     } catch (err) {
-      handleApiError(err, 'Export failed');
+      await handleApiError(err, 'Export failed');
     }
   };
 
@@ -501,7 +494,9 @@ export default function App() {
     setUserMenuOpen(false);
     await logout();
     setUser(null);
-    setAllLogs([]);
+    setPagedLogs([]);
+    setTotalLogsCount(0);
+    setStats(null);
     setCategories([]);
     setTags([]);
     setFilters(EMPTY_FILTERS);
@@ -544,8 +539,8 @@ export default function App() {
         categories={categories}
         tags={tags}
         filters={filters}
-        totalLogsCount={allLogs.length}
-        pinnedCount={stats.pinned_logs}
+        totalLogsCount={stats?.total_logs ?? totalLogsCount}
+        pinnedCount={stats?.pinned_logs ?? 0}
         onFilterChange={handleFilterChange}
         onToggleTagFilter={handleToggleTagFilter}
         onOpenNewCategory={() => setTaxonomyModal({ kind: 'category', item: null })}
@@ -759,6 +754,7 @@ export default function App() {
                   <input
                     ref={searchInputRef}
                     type="search"
+                    maxLength={200}
                     value={searchDraft}
                     onChange={(e) => setSearchDraft(e.target.value)}
                     placeholder={t('searchPlaceholder')}
@@ -856,7 +852,7 @@ export default function App() {
                 lang={lang}
                 logs={pagedLogs}
                 loading={loadingLogs}
-                totalLogs={filteredLogs.length}
+                totalLogs={totalLogsCount}
                 page={page}
                 pageSize={pageSize}
                 categories={categories}

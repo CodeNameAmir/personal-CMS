@@ -53,8 +53,25 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     setErrorMsg('');
     setSchemaMissing(false);
 
-    if (!username.trim() || !password) {
+    const trimmedUsername = username.trim().toLowerCase();
+    if (!trimmedUsername || !password) {
       setErrorMsg(t('authMissingFields'));
+      return;
+    }
+
+    if (mode === 'signup') {
+      if (!/^[a-z0-9][a-z0-9._-]{1,63}$/.test(trimmedUsername)) {
+        setErrorMsg(t('usernameInvalid'));
+        return;
+      }
+      if (password.length < 12) {
+        setErrorMsg(t('passwordMinLength'));
+        return;
+      }
+    }
+
+    if (password.length > 128) {
+      setErrorMsg(t('passwordMaxLength'));
       return;
     }
 
@@ -68,8 +85,8 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     try {
       const res =
         mode === 'signup'
-          ? await signup({ username: username.trim(), password })
-          : await login({ username: username.trim(), password });
+          ? await signup({ username: trimmedUsername, password })
+          : await login({ username: trimmedUsername, password });
       onAuthenticated(res.user);
     } catch (err) {
       if (err instanceof ApiError && err.code === 'SCHEMA_MISSING') {
@@ -132,6 +149,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                 type="text"
                 dir="ltr"
                 autoComplete="username"
+                maxLength={64}
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 placeholder={t('usernamePlaceholder')}
@@ -150,9 +168,11 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                   type={showPassword ? 'text' : 'password'}
                   dir={password ? 'ltr' : lang === 'fa' ? 'rtl' : 'ltr'}
                   autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+                  minLength={mode === 'signup' ? 12 : undefined}
+                  maxLength={128}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder={t('passwordPlaceholder')}
+                  placeholder={mode === 'signup' ? t('passwordPlaceholder') : '••••••••••••'}
                   className="w-full px-3.5 py-2.5 pe-10 text-sm rounded-lg bg-[var(--bg-canvas)] border border-[var(--border-hairline)] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)]"
                   required
                 />

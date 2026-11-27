@@ -33,10 +33,15 @@ import type {
 } from '../types/logbook';
 import {
   CATEGORY_PALETTE,
+  MAX_CATEGORY_NAME_LENGTH,
+  MAX_LOG_MESSAGE_LENGTH,
+  MAX_TAGS_PER_LOG,
   TAG_PALETTE,
   formatExactTime,
   formatRelativeTime,
+  isValidHexColor,
   parseTagInput,
+  safeHexColor,
 } from '../utils/logFormatters';
 
 interface ModalShellProps {
@@ -139,7 +144,7 @@ export const LogEditorModal: React.FC<LogEditorModalProps> = ({
   const addTagToken = (raw: string) => {
     const parsed = parseTagInput(raw);
     if (parsed.length === 0) return;
-    setSelectedTags((prev) => Array.from(new Set([...prev, ...parsed])));
+    setSelectedTags((prev) => Array.from(new Set([...prev, ...parsed])).slice(0, MAX_TAGS_PER_LOG));
     setTagDraft('');
   };
 
@@ -150,7 +155,7 @@ export const LogEditorModal: React.FC<LogEditorModalProps> = ({
       const trailing = parts.pop() || '';
       const completed = parseTagInput(parts.join(','));
       if (completed.length > 0) {
-        setSelectedTags((prev) => Array.from(new Set([...prev, ...completed])));
+        setSelectedTags((prev) => Array.from(new Set([...prev, ...completed])).slice(0, MAX_TAGS_PER_LOG));
       }
       setTagDraft(trailing);
       return;
@@ -181,7 +186,7 @@ export const LogEditorModal: React.FC<LogEditorModalProps> = ({
     }
 
     const extra = tagDraft.trim() ? parseTagInput(tagDraft) : [];
-    const finalTags = Array.from(new Set([...selectedTags, ...extra]));
+    const finalTags = Array.from(new Set([...selectedTags, ...extra])).slice(0, MAX_TAGS_PER_LOG);
 
     setSaving(true);
     try {
@@ -235,6 +240,7 @@ export const LogEditorModal: React.FC<LogEditorModalProps> = ({
             id="log-msg-input"
             dir="auto"
             rows={5}
+            maxLength={MAX_LOG_MESSAGE_LENGTH}
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             placeholder={t('messagePlaceholder')}
@@ -323,7 +329,7 @@ export const LogEditorModal: React.FC<LogEditorModalProps> = ({
                   onClick={() => addTagToken(tg.name)}
                   className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-[var(--border-hairline)] bg-[var(--bg-canvas)] hover:bg-[var(--bg-hover)] text-[11px] font-mono text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
                 >
-                  <span style={{ color: tg.color }}>#</span>
+                  <span style={{ color: safeHexColor(tg.color) }}>#</span>
                   <span>{tg.name}</span>
                 </button>
               ))}
@@ -422,7 +428,7 @@ export const LogDetailModal: React.FC<LogDetailModalProps> = ({
           <span className="flex items-center gap-2 font-medium text-[var(--text-primary)]">
             <span
               className="w-2.5 h-2.5 rounded-full"
-              style={{ backgroundColor: log.category_color || '#64748b' }}
+              style={{ backgroundColor: safeHexColor(log.category_color) }}
             />
             <span>{log.category_name || t('uncategorized')}</span>
           </span>
@@ -453,7 +459,7 @@ export const LogDetailModal: React.FC<LogDetailModalProps> = ({
                   }}
                   className="font-mono text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                 >
-                  <span style={{ color: tg.color }}>#</span>
+                  <span style={{ color: safeHexColor(tg.color) }}>#</span>
                   {tg.name}
                 </button>
               ))
@@ -504,9 +510,13 @@ export const TaxonomyModal: React.FC<TaxonomyModalProps> = ({
       setError(t('nameRequired'));
       return;
     }
+    if (!isValidHexColor(color)) {
+      setError(t('invalidHexColor'));
+      return;
+    }
     setSaving(true);
     try {
-      await onSave(name.trim(), color, item?.id);
+      await onSave(name.trim(), color.trim(), item?.id);
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Save failed');
@@ -588,6 +598,7 @@ export const TaxonomyModal: React.FC<TaxonomyModalProps> = ({
             <input
               id="tax-name"
               type="text"
+              maxLength={kind === 'category' ? MAX_CATEGORY_NAME_LENGTH : 32}
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder={kind === 'category' ? 'Deployment' : 'production'}
@@ -605,7 +616,7 @@ export const TaxonomyModal: React.FC<TaxonomyModalProps> = ({
             <input
               type="color"
               aria-label={t('colorLabel')}
-              value={color}
+              value={safeHexColor(color, palette[0])}
               onChange={(e) => setColor(e.target.value)}
               className="w-10 h-9 rounded border border-[var(--border-hairline)] bg-[var(--bg-canvas)] cursor-pointer"
             />
@@ -867,8 +878,12 @@ export const AccountModal: React.FC<AccountModalProps> = ({
     e.preventDefault();
     setMsg('');
     setErr('');
-    if (newPass.length < 6) {
+    if (newPass.length < 12) {
       setErr(t('passwordMinLength'));
+      return;
+    }
+    if (newPass.length > 128) {
+      setErr(t('passwordMaxLength'));
       return;
     }
     if (newPass !== confirmPass) {
@@ -932,9 +947,14 @@ export const AccountModal: React.FC<AccountModalProps> = ({
   const cfg = getLoadedConfig();
   const baseSupabaseUrl = cfg.supabaseUrl ? cfg.supabaseUrl.replace(/\/+$/, '') : 'https://YOUR_PROJECT.supabase.co';
   const pubKey = cfg.supabasePublishableKey || 'YOUR_SUPABASE_PUBLISHABLE_KEY';
-  const webhookUrl = `${baseSupabaseUrl}/rest/v1/rpc/lb_ingest_webhook`;
+  const originUrl = typeof window !== 'undefined' ? window.location.origin : 'https://your-app.example.com';
   const sampleTokenForCurl = newlyCreatedToken?.raw_token || 'lbk_YOUR_API_TOKEN';
-  const curlSnippet = `curl -X POST "${webhookUrl}" \\
+  const curlSnippet = cfg.bffEnabled
+    ? `curl -X POST "${originUrl}/api/webhook" \\
+  -H "Authorization: Bearer ${sampleTokenForCurl}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"message":"Deploy completed on node-1","category":"Deployment","tags":["prod","webhook"],"pinned":false}'`
+    : `curl -X POST "${baseSupabaseUrl}/rest/v1/rpc/lb_ingest_webhook" \\
   -H "apikey: ${pubKey}" \\
   -H "Authorization: Bearer ${pubKey}" \\
   -H "Content-Type: application/json" \\
@@ -1091,6 +1111,7 @@ export const AccountModal: React.FC<AccountModalProps> = ({
                   id="cp-cur"
                   type="password"
                   dir="ltr"
+                  maxLength={128}
                   value={currentPass}
                   onChange={(e) => setCurrentPass(e.target.value)}
                   required
@@ -1106,6 +1127,8 @@ export const AccountModal: React.FC<AccountModalProps> = ({
                     id="cp-new"
                     type="password"
                     dir="ltr"
+                    minLength={12}
+                    maxLength={128}
                     value={newPass}
                     onChange={(e) => setNewPass(e.target.value)}
                     required
@@ -1120,6 +1143,8 @@ export const AccountModal: React.FC<AccountModalProps> = ({
                     id="cp-conf"
                     type="password"
                     dir="ltr"
+                    minLength={12}
+                    maxLength={128}
                     value={confirmPass}
                     onChange={(e) => setConfirmPass(e.target.value)}
                     required
@@ -1173,6 +1198,7 @@ export const AccountModal: React.FC<AccountModalProps> = ({
             <form onSubmit={handleCreateToken} className="flex flex-col sm:flex-row gap-2">
               <input
                 type="text"
+                maxLength={64}
                 value={tokenName}
                 onChange={(e) => setTokenName(e.target.value)}
                 placeholder={t('tokenNamePlaceholder')}

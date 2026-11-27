@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 import { getTranslator } from '../i18n/translations';
 import type { Category, Language, LogEntry } from '../types/logbook';
-import { formatExactTime, formatRelativeTime } from '../utils/logFormatters';
+import { formatExactTime, formatRelativeTime, safeHexColor } from '../utils/logFormatters';
 
 interface LogTableProps {
   lang: Language;
@@ -158,6 +158,7 @@ export const LogTable: React.FC<LogTableProps> = ({
             >
               <input
                 type="text"
+                maxLength={32}
                 value={bulkTagInput}
                 onChange={(e) => setBulkTagInput(e.target.value)}
                 placeholder={t('addTagPlaceholder')}
@@ -307,7 +308,7 @@ export const LogTable: React.FC<LogTableProps> = ({
                           >
                             <span
                               className="w-2 h-2 rounded-full shrink-0"
-                              style={{ backgroundColor: log.category_color || '#64748b' }}
+                              style={{ backgroundColor: safeHexColor(log.category_color) }}
                             />
                             <span className="truncate">{log.category_name || t('uncategorized')}</span>
                           </button>
@@ -338,7 +339,7 @@ export const LogTable: React.FC<LogTableProps> = ({
                                   className="inline-flex items-center gap-1 text-xs font-mono text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
                                   title={`#${tag.name}`}
                                 >
-                                  <span style={{ color: tag.color }}>#</span>
+                                  <span style={{ color: safeHexColor(tag.color) }}>#</span>
                                   <span>{tag.name}</span>
                                 </button>
                               ))}
@@ -443,7 +444,7 @@ export const LogTable: React.FC<LogTableProps> = ({
                     <div className="flex items-center gap-2 min-w-0">
                       <span
                         className="w-2 h-2 rounded-full shrink-0"
-                        style={{ backgroundColor: log.category_color || '#64748b' }}
+                        style={{ backgroundColor: safeHexColor(log.category_color) }}
                       />
                       <span className="text-xs font-medium text-[var(--text-primary)] truncate">
                         {log.category_name || t('uncategorized')}
@@ -479,7 +480,7 @@ export const LogTable: React.FC<LogTableProps> = ({
                           onClick={() => onToggleTag(tag.name)}
                           className="text-xs font-mono text-[var(--text-secondary)]"
                         >
-                          <span style={{ color: tag.color }}>#</span>
+                          <span style={{ color: safeHexColor(tag.color) }}>#</span>
                           {tag.name}
                         </button>
                       ))}

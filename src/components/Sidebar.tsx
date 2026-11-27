@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { getTranslator } from '../i18n/translations';
 import type { Category, Language, LogFilters, Tag } from '../types/logbook';
+import { safeHexColor } from '../utils/logFormatters';
 
 interface SidebarProps {
   lang: Language;
@@ -259,7 +260,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   >
                     <span
                       className="w-3 h-3 rounded-full shrink-0"
-                      style={{ backgroundColor: cat.color }}
+                      style={{ backgroundColor: safeHexColor(cat.color) }}
                     />
                   </button>
                 );
@@ -294,7 +295,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       >
                         <span
                           className="w-2.5 h-2.5 rounded-full shrink-0"
-                          style={{ backgroundColor: cat.color }}
+                          style={{ backgroundColor: safeHexColor(cat.color) }}
                         />
                         <span className={`truncate ${active ? 'font-medium' : ''}`}>{cat.name}</span>
                       </button>
@@ -390,7 +391,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         : 'hover:bg-[var(--bg-hover)]'
                     }`}
                   >
-                    <Hash className="w-3.5 h-3.5" style={{ color: tag.color }} />
+                    <Hash className="w-3.5 h-3.5" style={{ color: safeHexColor(tag.color) }} />
                   </button>
                 );
               })}
@@ -423,7 +424,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         }}
                         className="flex-1 flex items-center gap-2 px-2.5 py-1.5 text-sm text-start min-w-0"
                       >
-                        <Hash className="w-3.5 h-3.5 shrink-0" style={{ color: tag.color }} />
+                        <Hash className="w-3.5 h-3.5 shrink-0" style={{ color: safeHexColor(tag.color) }} />
                         <span className={`truncate font-mono text-xs ${selected ? 'font-medium' : ''}`}>
                           {tag.name}
                         </span>
